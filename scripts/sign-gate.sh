@@ -128,8 +128,11 @@ PROFILE_ARGS=("$WIDGET_ID=$WORK/widget.mobileprovision" "$SHARE_ID=$WORK/share.m
 value() { sed -n "s/^$1=//p" "$WORK/report.txt" | head -1; }
 
 # --- assertions --------------------------------------------------------------
+echo "==> the report the signer wrote"
+cat "$WORK/report.txt"
+
 echo "==> codesign --verify --deep --strict"
-codesign --verify --deep --strict "$APP" || fail "codesign --verify failed"
+codesign --verify --deep --strict --verbose=4 "$APP" || fail "codesign --verify failed"
 
 echo "==> the app is signed with its own profile's entitlements"
 main_sha="$(value main_sha256)"
