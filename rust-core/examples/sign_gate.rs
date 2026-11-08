@@ -128,10 +128,10 @@ fn run() -> Result<(), String> {
     for (id, der) in &profiles {
         out.push_str(&format!("profile_sha256[{id}]={}\n", sha256_hex(der)));
     }
-    {
-        let app_ref: &Path = &app;
-        walk(app_ref, app_ref, &mut out);
-    }
+    // The app itself, then everything nested: the script compares each
+    // bundle's embedded profile with the one issued for its identifier.
+    describe(&app, &app, &mut out);
+    walk(&app, &app, &mut out);
     print!("{out}");
     Ok(())
 }
@@ -142,27 +142,24 @@ fn walk(root: &Path, dir: &Path, out: &mut String) {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if path.is_dir() {
-            if name.ends_with(".app") || name.ends_with(".appex") || name.ends_with(".framework") {
-                let has_sig = path.join("_CodeSignature").join("CodeResources").is_file();
-                let profile = fs::read(path.join("embedded.mobileprovision")).ok();
-                let id = plist_bundle_id(&path).unwrap_or_default();
-                out.push_str(&format!("bundle[{}]={id}\n", rel(root, &path)));
-                out.push_str(&format!(
-                    "codesigned[{}]={}\n",
-                    rel(root, &path),
-                    has_sig
-                ));
-                match profile {
-                    Some(der) => out.push_str(&format!(
-                        "embedded_sha256[{}]={}\n",
-                        rel(root, &path),
-                        sha256_hex(&der)
-                    )),
-                    None => out.push_str(&format!("embedded_sha256[{}]=none\n", rel(root, &path))),
-                }
+            if name.ends_with(".appex") || name.ends_with(".framework") {
+                describe(root, &path, out);
             }
             walk(root, &path, out);
         }
+    }
+}
+
+/// One bundle's identifier, whether it is sealed, and the profile it embeds.
+fn describe(root: &Path, path: &Path, out: &mut String) {
+    let key = rel(root, path);
+    let has_sig = path.join("_CodeSignature").join("CodeResources").is_file();
+    let id = plist_bundle_id(path).unwrap_or_default();
+    out.push_str(&format!("bundle[{key}]={id}\n"));
+    out.push_str(&format!("codesigned[{key}]={has_sig}\n"));
+    match fs::read(path.join("embedded.mobileprovision")).ok() {
+        Some(der) => out.push_str(&format!("embedded_sha256[{key}]={}\n", sha256_hex(&der))),
+        None => out.push_str(&format!("embedded_sha256[{key}]=none\n")),
     }
 }
 
