@@ -111,6 +111,12 @@ der = { version = "0.8", features = ["oid"] }
 x509-cert = "0.3"
 rsa = "0.9.10"
 
+# The signer, named directly so `examples/sign_gate.rs` can drive it on the
+# host: the gate signs a fixture app and lets scripts/sign-gate.sh check the
+# result with Apple's codesign. Same version the vendored isideload uses, so
+# cargo unifies it to the one instance the app links.
+apple-codesign-quick = "0.1.0"
+
 # Logging spine: forward idevice's `tracing` events (and any `log` records via
 # the tracing-log compat layer, enabled by default) through the FFI callback.
 tracing = "0.1"

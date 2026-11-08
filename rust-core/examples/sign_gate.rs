@@ -84,11 +84,11 @@ fn run() -> Result<(), String> {
     let mut out = String::new();
     out.push_str(&format!("team_id={team_id}\n"));
     out.push_str(&format!(
-        "main_sha256={:x}\n",
+        "main_sha256={}\n",
         sha256_hex(&main_profile_der)
     ));
     for (id, der) in &profiles {
-        out.push_str(&format!("profile_sha256[{id}]={:x}\n", sha256_hex(der)));
+        out.push_str(&format!("profile_sha256[{id}]={}\n", sha256_hex(der)));
     }
     {
         let app_ref: &Path = &app;
@@ -116,7 +116,7 @@ fn walk(root: &Path, dir: &Path, out: &mut String) {
                 ));
                 match profile {
                     Some(der) => out.push_str(&format!(
-                        "embedded_sha256[{}]={:x}\n",
+                        "embedded_sha256[{}]={}\n",
                         rel(root, &path),
                         sha256_hex(&der)
                     )),
