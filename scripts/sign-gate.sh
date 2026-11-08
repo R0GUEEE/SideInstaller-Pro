@@ -200,10 +200,15 @@ echo "==> the profiles are sealed into CodeResources"
 # SideStore's extension check pass. `plutil -extract` wants the dictionary as
 # its target, so the key is pulled out of the JSON conversion instead.
 sealed() {
-  plutil -convert json -o - "$1" | python3 -c '
+  plutil -convert json -o - "$1" 2>&1 | python3 -c '
 import json, sys
-data = json.load(sys.stdin)
-files = data.get("files", {})
+raw = sys.stdin.read()
+try:
+    files = json.loads(raw).get("files", {})
+except Exception as e:
+    print("  unreadable CodeResources:", raw[:200], file=sys.stderr)
+    sys.exit(1)
+print("  sealed files:", ", ".join(sorted(files)) or "(none)", file=sys.stderr)
 sys.exit(0 if "embedded.mobileprovision" in files else 1)
 '
 }
