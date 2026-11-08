@@ -26,9 +26,26 @@ WIDGET_ID="$APP_ID.Widget"
 SHARE_ID="$APP_ID.Share"
 
 # --- certificate -------------------------------------------------------------
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -days 2 \
-  -subj "/CN=Apple Development: Fixture/C=US/O=$TEAM" >/dev/null 2>&1
+# Apple's own certificates carry the extended key usages codesign checks; a
+# plain self-signed one is refused with "Invalid Key Usage for policy".
+cat > "$WORK/ext.cnf" <<'CNF'
+[ req ]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[ dn ]
+CN = Apple Development: Fixture
+O = Fixture Team
+C = US
+OU = ABCDE12345
+[ ext ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning,1.2.840.113635.100.4.1,1.2.840.113635.100.4.13
+subjectKeyIdentifier = hash
+CNF
+openssl req -x509 -newkey rsa:2048 -nodes -config "$WORK/ext.cnf" \
+  -keyout "$WORK/key.pem" -out "$WORK/cert.pem" -days 2 >/dev/null 2>&1
 openssl x509 -in "$WORK/cert.pem" -outform der -out "$WORK/cert.der"
 
 # --- profiles ----------------------------------------------------------------
