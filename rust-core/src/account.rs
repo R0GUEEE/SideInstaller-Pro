@@ -768,9 +768,8 @@ pub unsafe fn appid_quota(
     };
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let (rt, sideloader) = (&session.rt, &session.sideloader);
+        let (rt, sideloader) = (&session.rt, &mut session.sideloader);
         rt.block_on(async {
-            let mut sideloader = sideloader;
             let team = sideloader
                 .get_team()
                 .await
