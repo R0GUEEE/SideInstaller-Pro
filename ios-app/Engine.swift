@@ -124,6 +124,12 @@ final class Engine: ObservableObject {
 
     // MARK: Inputs
 
+    /// Applies to future installs and refreshes. Off stops requesting the
+    /// capability; it does not revoke capabilities already enabled on App IDs.
+    @Published var extraMemory: Bool = UserDefaults.standard.bool(forKey: "signingExtraMemory") {
+        didSet { UserDefaults.standard.set(extraMemory, forKey: "signingExtraMemory") }
+    }
+
     /// Active Apple ID credentials, read from `AccountStore` (entered during
     /// setup, switched in Settings › Account). Views observe the store directly.
     var appleID: String { AccountStore.shared.activeAppleID }
@@ -2037,12 +2043,14 @@ final class Engine: ObservableObject {
         // get the pairing file after the install instead.
         let pairingPath = pairingFilePath ?? PairingController.pairingFilePath()
         let source = downloadedSource ?? installSource
+        let requestExtraMemory = extraMemory
         setStep(.sign, .active)
         do {
             let path = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipa, udid: udid, deviceName: name,
                                      pairingFilePath: pairingPath,
-                                     forMadeira: source == .madeira || Self.isMadeira(ipaPath: ipa))
+                                     forMadeira: source == .madeira || Self.isMadeira(ipaPath: ipa),
+                                     extraMemory: requestExtraMemory)
             }
             signedAppPath = path
             // Read the app's name from the signed bundle (imported IPAs have none before this).
@@ -2076,15 +2084,19 @@ final class Engine: ObservableObject {
     /// app group. Madeira renews its own profile and registers its App ID again
     /// when it runs out; it can restore the first on a new App ID, not the second.
     private func performSign(session: OpaquePointer, ipa: String, udid: String, deviceName: String,
-                             pairingFilePath: String, forMadeira: Bool) throws -> String {
+                             pairingFilePath: String, forMadeira: Bool, extraMemory: Bool) throws -> String {
         log("Signing \(ipa) …")
         if forMadeira {
             log("Signing for Madeira: Increased Memory Limit on its App ID (it shows as Memory+), and no app group.")
         }
+        let increasedMemory = forMadeira || extraMemory
+        if extraMemory && !forMadeira {
+            log("Extra memory: requesting Increased Memory Limit on the app's App IDs before provisioning.")
+        }
         var signed: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
         let rc = si_sign_ipa(session, ipa, udid, deviceName, pairingFilePath,
-                             forMadeira ? 1 : 0, forMadeira ? 0 : 1, &signed, &error)
+                             increasedMemory ? 1 : 0, forMadeira ? 0 : 1, &signed, &error)
         if rc == 0 {
             let path = signed.map { String(cString: $0) } ?? ""
             signed.map { si_string_free($0) }
@@ -3782,11 +3794,13 @@ final class Engine: ObservableObject {
         }
         let path = pairingFilePath ?? PairingController.pairingFilePath()
         let signed: String
+        let requestExtraMemory = extraMemory
         do {
             signed = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipaPath, udid: udid, deviceName: device,
                                      pairingFilePath: path,
-                                     forMadeira: Self.isMadeira(ipaPath: ipaPath))
+                                     forMadeira: Self.isMadeira(ipaPath: ipaPath),
+                                     extraMemory: requestExtraMemory)
             }
         } catch EngineError.certExists {
             // Don't set `certConflict`: its retry button starts a full install

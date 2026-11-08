@@ -815,6 +815,14 @@ struct ContentView: View {
         PanelCard {
             VStack(alignment: .leading, spacing: 10) {
                 sectionTitle(L("Signing"), systemImage: "checkmark.seal")
+                Toggle(isOn: $engine.extraMemory) {
+                    Label(L("Extra memory"), systemImage: "memorychip")
+                }
+                .disabled(engine.isRunning)
+                Text(L("Requests Apple's Increased Memory Limit when signing or refreshing apps. Saved for future installs. The actual limit depends on the device and provisioning profile. Madeira always requests it; turning this off does not revoke an existing grant."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Divider().opacity(0.12)
                 row(ok: !engine.normalizedAppleID.isEmpty, icon: "person.badge.key",
                     title: engine.normalizedAppleID.isEmpty
                         ? L("Sign in with an Apple ID")
@@ -2259,3 +2267,4 @@ struct FileImporterRepresentableView: UIViewControllerRepresentable {
         }
     }
 }
+
