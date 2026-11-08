@@ -667,7 +667,7 @@ fn app_id_quota(bundle_id: &str, team_id: &str, listing: &ListAppIdsResponse) ->
 /// Whether the team's profiles are all wildcard ones, read the same way the
 /// signer reads them: a team made only of `TEAM.*` profiles needs no App ID for
 /// an app or its extensions.
-async fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool, String> {
+async fn wildcard_profiles_cover_team(session: &SignSession) -> Result<bool, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Entry {
@@ -682,26 +682,38 @@ async fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool,
         #[serde(default)]
         provisioning_profiles: Vec<Entry>,
     }
-    let team = session
-        .sideloader
-        .get_team()
-        .await
-        .map_err(|e| format!("get_team: {}", report_text(&e)))?;
-    let body = plist_macro::plist!(dict { "teamId": &team.team_id });
-    let url = "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action?clientId=XABBG36SBA";
-    let listed: Result<Listing, _> = session
-        .sideloader
-        .get_dev_session()
-        .send_dev_request(url, body, "provisioningProfileList")
-        .await;
-    let Ok(listing) = listed else {
-        return Ok(false);
-    };
-    Ok(!listing.provisioning_profiles.is_empty()
-        && listing.provisioning_profiles.iter().all(|entry| {
-            entry.kind.as_deref().map(|k| k.to_ascii_uppercase().contains("WILDCARD")).unwrap_or(false)
-                || entry.name.as_deref().map(|n| n.contains(".*")).unwrap_or(false)
-        }))
+
+    // The runtime and the signer are borrowed together, the way `sign_ipa`
+    // does it: the future only ever holds the mutable one.
+    let (rt, sideloader) = (&session.rt, &session.sideloader);
+    rt.block_on(async {
+        let mut sideloader = sideloader;
+        let team = sideloader
+            .get_team()
+            .await
+            .map_err(|e| format!("get_team: {}", report_text(&e)))?;
+        let body = plist::Dictionary::from_iter([(
+            "teamId".to_string(),
+            plist::Value::String(team.team_id.clone()),
+        )]);
+        let url = "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action?clientId=XABBG36SBA";
+        let listed: Result<Listing, _> = sideloader
+            .get_dev_session()
+            .send_dev_request(url, body, "provisioningProfileList")
+            .await;
+        let Ok(listing) = listed else {
+            return Ok(false);
+        };
+        Ok(!listing.provisioning_profiles.is_empty()
+            && listing.provisioning_profiles.iter().all(|entry| {
+                entry
+                    .kind
+                    .as_deref()
+                    .map(|k| k.to_ascii_uppercase().contains("WILDCARD"))
+                    .unwrap_or(false)
+                    || entry.name.as_deref().map(|n| n.contains(".*")).unwrap_or(false)
+            }))
+    })
 }
 
 fn app_id_quota_with_extensions(
@@ -746,15 +758,25 @@ pub unsafe fn appid_quota(
         return 2;
     }
 
+    // Read before the future borrows the session: the check wants the whole
+    // session, the account listing below wants its parts.
+    let wildcard = match wildcard_profiles_cover_team(session) {
+        Ok(wildcard) => wildcard,
+        Err(e) => {
+            *out_error = cstr(e);
+            return 1;
+        }
+    };
+
     let result = catch_unwind(AssertUnwindSafe(|| {
-        session.rt.block_on(async {
-            let team = session
-                .sideloader
+        let (rt, sideloader) = (&session.rt, &session.sideloader);
+        rt.block_on(async {
+            let mut sideloader = sideloader;
+            let team = sideloader
                 .get_team()
                 .await
                 .map_err(|e| format!("get_team: {}", report_text(&e)))?;
-            let listing = session
-                .sideloader
+            let listing = sideloader
                 .get_dev_session()
                 .list_app_ids(&team, None)
                 .await
@@ -770,7 +792,6 @@ pub unsafe fn appid_quota(
             // identifier already, so signing registers nothing and the estimate
             // must say so; otherwise the install menu asks for an approval that
             // costs no App ID at all.
-            let wildcard = wildcard_profiles_cover_team(session).await?;
             let quota = if wildcard {
                 let mut plain = app_id_quota(main, &team.team_id, &listing);
                 plain.new_ids.clear();
