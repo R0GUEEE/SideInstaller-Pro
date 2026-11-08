@@ -667,7 +667,7 @@ fn app_id_quota(bundle_id: &str, team_id: &str, listing: &ListAppIdsResponse) ->
 /// Whether the team's profiles are all wildcard ones, read the same way the
 /// signer reads them: a team made only of `TEAM.*` profiles needs no App ID for
 /// an app or its extensions.
-async fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool, String> {
+fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool, String> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Entry {
@@ -759,7 +759,7 @@ pub unsafe fn appid_quota(
 
     // Read before the future borrows the session: the check wants the whole
     // session, the account listing below wants its parts.
-    let wildcard = match wildcard_profiles_cover_team(session).await {
+    let wildcard = match wildcard_profiles_cover_team(session) {
         Ok(wildcard) => wildcard,
         Err(e) => {
             *out_error = cstr(e);
