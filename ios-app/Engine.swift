@@ -2055,6 +2055,10 @@ final class Engine: ObservableObject {
             signedAppPath = path
             // Read the app's name from the signed bundle (imported IPAs have none before this).
             signedDisplayName = signedAppName()
+            // The signature is checked against its profiles here, before the
+            // upload: an app signed for the wrong identifier installs and then
+            // fails at launch, which looks like an app bug, not a signing one.
+            auditSignedBundle(path)
             setStep(.sign, .done)
         } catch {
             // User-fixable failures get an explanatory card. A certificate that
@@ -2120,6 +2124,20 @@ final class Engine: ObservableObject {
         }
     }
 
+    /// Reads the signed bundle back and logs what it says: one line per bundle
+    /// with the identifier it was signed for, and any mismatch with the
+    /// profile embedded beside it. Warns rather than stops — the check is a
+    /// second opinion on the signer, and a false alarm must not block an
+    /// install that would otherwise work.
+    @MainActor
+    private func auditSignedBundle(_ path: String) {
+        let audit = SignedBundleAudit.run(appPath: path)
+        log("=== Signature ===")
+        for line in audit.summary { log("  \(line)") }
+        for note in audit.notes { log("  \(note)") }
+        for problem in audit.problems { log("⚠️ \(problem)") }
+    }
+
     /// Applies the App configuration to a custom `.ipa` in place, before it's
     /// signed. Anything else — SideStore, LiveContainer, Madeira — is left
     /// exactly as published.
@@ -2145,6 +2163,17 @@ final class Engine: ObservableObject {
         for line in outcome.warnings { log("⚠️ \(line)") }
         if outcome.applied.isEmpty, outcome.warnings.isEmpty {
             log("  Nothing to change: this build already carries it.")
+        }
+        // What the signer would make of it, checked on the patched archive:
+        // a duplicated identifier or a non-iOS bundle fails here, before the
+        // App IDs are registered and a certificate is used.
+        let audit = await Task.detached(priority: .userInitiated) {
+            IPAPatch.auditBeforeSigning(url)
+        }.value
+        for note in audit.notes { log("⚠️ \(note)") }
+        if let problem = audit.problems.first {
+            for line in audit.problems { log("⛔️ \(line)") }
+            throw EngineError.message(L("This build can't be signed: %@", problem))
         }
     }
 
@@ -2679,6 +2708,7 @@ final class Engine: ObservableObject {
             let entitlements = IPAPatch.readEntitlements(from: ipa) ?? [:]
             let findings = SideloadGuard.scan(ipa)
             let extensions = IPAExtensions.read(ipa)
+            let strays = IPAExtensions.strays(in: ipa)
             let identity = BuildIdentity(
                 name: (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? "",
                 bundleID: info["CFBundleIdentifier"] as? String ?? "",
@@ -2694,6 +2724,11 @@ final class Engine: ObservableObject {
                 if !extensions.isEmpty {
                     let stray = extensions.filter { !$0.isChild }
                     self.log("Extensions: \(extensions.count) found\(stray.isEmpty ? "" : ", \(stray.count) with an identifier outside the app")")
+                }
+                if !strays.isEmpty {
+                    // The signer refuses these; saying so here means the run
+                    // stops before a download, not at the end of signing.
+                    self.log("⛔️ Extension(s) inside Frameworks: \(strays.map(\.bundleID).joined(separator: ", ")) — the signer cannot give these a profile of their own, so this build has to lose them (App configuration › Extensions) before it can be signed.")
                 }
                 // Automatic: a build that clearly looks for Cydia, Frida or a
                 // profile is given the patch without being asked — unless the

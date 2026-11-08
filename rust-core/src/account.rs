@@ -664,6 +664,46 @@ fn app_id_quota(bundle_id: &str, team_id: &str, listing: &ListAppIdsResponse) ->
     }
 }
 
+/// Whether the team's profiles are all wildcard ones, read the same way the
+/// signer reads them: a team made only of `TEAM.*` profiles needs no App ID for
+/// an app or its extensions.
+async fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Entry {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listing {
+        #[serde(default)]
+        provisioning_profiles: Vec<Entry>,
+    }
+    let team = session
+        .sideloader
+        .get_team()
+        .await
+        .map_err(|e| format!("get_team: {}", report_text(&e)))?;
+    let body = plist_macro::plist!(dict { "teamId": &team.team_id });
+    let url = "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action?clientId=XABBG36SBA";
+    let listed: Result<Listing, _> = session
+        .sideloader
+        .get_dev_session()
+        .send_dev_request(url, body, "provisioningProfileList")
+        .await;
+    let Ok(listing) = listed else {
+        return Ok(false);
+    };
+    Ok(!listing.provisioning_profiles.is_empty()
+        && listing.provisioning_profiles.iter().all(|entry| {
+            entry.kind.as_deref().map(|k| k.to_ascii_uppercase().contains("WILDCARD")).unwrap_or(false)
+                || entry.name.as_deref().map(|n| n.contains(".*")).unwrap_or(false)
+        }))
+}
+
 fn app_id_quota_with_extensions(
     main: &str, extensions: &[String], team: &str, listing: &ListAppIdsResponse,
 ) -> Result<AppIdQuota, String> {
@@ -726,7 +766,18 @@ pub unsafe fn appid_quota(
             };
             let main = ids.first().filter(|id| !id.is_empty())
                 .ok_or_else(|| "Missing main bundle ID".to_string())?;
-            let quota = app_id_quota_with_extensions(main, &ids[1..], &team.team_id, &listing)?;
+            // A team whose profiles are wildcard ones (`TEAM.*`) covers every
+            // identifier already, so signing registers nothing and the estimate
+            // must say so; otherwise the install menu asks for an approval that
+            // costs no App ID at all.
+            let wildcard = wildcard_profiles_cover_team(session).await?;
+            let quota = if wildcard {
+                let mut plain = app_id_quota(main, &team.team_id, &listing);
+                plain.new_ids.clear();
+                plain
+            } else {
+                app_id_quota_with_extensions(main, &ids[1..], &team.team_id, &listing)?
+            };
             tracing::info!(
                 "App IDs: {} new for this app, {:?} of {:?} available",
                 quota.new_ids.len(),

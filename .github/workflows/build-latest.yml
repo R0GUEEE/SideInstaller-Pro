@@ -7,6 +7,8 @@ on:
       - 'ios-app/**'
       - 'rust-core/**'
       - 'tools/install-regression/**'
+      - 'scripts/sign-gate.sh'
+      - 'rust-core/examples/sign_gate.rs'
       - 'tools/app-files-regression/**'
       - '.github/workflows/build-latest.yml'
       - 'project.yml'

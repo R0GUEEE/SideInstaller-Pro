@@ -612,6 +612,49 @@ else to choose here. `si_appid_quota` (`rust-core/src/account.rs`) counts the
 main App ID alone to match. App IDs registered for extensions before stay on the
 team until they expire.
 
+**13. `src/sideload/sign.rs`, `application.rs`, `sideloader.rs`,
+`src/dev/app_ids.rs` — check a signature before making it, and register nothing
+on a wildcard team.**
+
+What the signer produced was never read back. Five things could go wrong
+quietly, each ending in a signature that installs and then misbehaves:
+
+- **An extension nested in another bundle kept its old identifier.**
+  `update_bundle_id` renamed only top-level `PlugIns` entries, so a `.appex`
+  under one of those was signed for an App ID nobody registered (change 12).
+  It now walks the whole tree, taking each suffix from the original identifier
+  and leaving an already-re-prefixed build alone (idempotent).
+- **An `.appex` outside `PlugIns`** (an SDK's helper inside `Frameworks/`) got
+  the empty entitlement set and no profile, and nothing said so. `sign` refuses
+  such a build now, naming the bundle; the app checks for one before it signs.
+- **Two bundles with one `CFBundleIdentifier`** would both be looked up by
+  apple-codesign-quick, and the second would be handed the first one's profile.
+  That is an error now.
+- **A profile that has expired** (`ExpirationDate` within a minute, or past)
+  is refused rather than signed with. SideStore's 7-day profiles make this
+  reachable with a device clock that is ahead.
+- **A profile that does not grant the identifier** it is used for — a wildcard
+  profile signed for an app on an ordinary team, or the reverse — is refused.
+  `application-identifier` is read from the profile and checked: exact for an
+  explicit App ID, prefix (`TEAM.*`, `com.example.*`) for a wildcard, and
+  children of an App ID allowed, as Apple allows them.
+
+Capability changes are read back. `ensure_group_feature` and
+`add_increased_memory_limit` return "accepted", but the profile is built from
+what Apple stored, so `require_app_group_feature` and `require_capability`
+(`AppIdVerification`) list the App ID again and fail when the feature is not
+set. Without that, a PATCH Apple answered but did not apply produced a profile
+without `application-groups` and a signature that followed it: an app installed
+with a shared container it cannot open.
+
+**Wildcard teams.** When every profile the team holds is a wildcard one
+(`TEAM.*`), no App ID is registered for the app or its extensions and no app
+group is asked for: the profile already covers every identifier, and on a free
+account the ten App IDs are worth keeping. `si_appid_quota` makes the same
+check, so the install menu does not ask for an approval that costs nothing.
+`keychain-access-groups` for LiveContainer is merged with what the profile has
+rather than replacing it.
+
 ## Re-vendoring
 
 Upstream fixed change 1 its own way in `baca89d` (per-extension profiles). Since

@@ -47,6 +47,27 @@ do {
     exit(1)
 }
 
+// The archived entitlements the applied configuration declares: the run above
+// had no entitlement edits, so anything there is the app's own declaration.
+do {
+    var edited = config
+    edited.entitlements = [PlistEdit(key: "com.apple.developer.kernel.increased-memory-limit",
+                                     kind: .boolean, value: "true")]
+    _ = try IPAPatch.apply(edited, injectors: [], to: ipa)
+    guard let entitlements = IPAPatch.readEntitlements(from: ipa) else {
+        print("FAILED: no entitlements found in the patched archive")
+        exit(1)
+    }
+    if entitlements["keychain-access-groups"] == nil {
+        print("FAILED: the keychain access group was not written")
+        exit(1)
+    }
+    if entitlements["com.apple.developer.kernel.increased-memory-limit"] == nil {
+        print("FAILED: a configured entitlement was not written")
+        exit(1)
+    }
+}
+
 // A second pass must be a no-op: same identity, same tweak, nothing rewritten.
 do {
     let second = try IPAPatch.apply(config, injectors: [], to: ipa)
@@ -81,6 +102,25 @@ if CommandLine.arguments.count >= 4 {
         print("FAILED reading the deb: \(error.localizedDescription)")
         exit(1)
     }
+}
+
+// Self-declared entitlements: what the app may write without a profile.
+do {
+    let declared = IPAPatch.selfDeclaredEntitlements(for: "com.example.app.TEAMID")
+    guard let groups = declared["keychain-access-groups"] as? [String],
+          groups == ["com.example.app.TEAMID"] else {
+        print("FAILED: the app is not given its own keychain access group")
+        exit(1)
+    }
+    if declared.keys.contains(where: { $0.hasPrefix("com.apple.developer.") }) {
+        print("FAILED: a profile-granted entitlement was declared by the app")
+        exit(1)
+    }
+    if !IPAPatch.selfDeclaredEntitlements(for: "").isEmpty {
+        print("FAILED: an app with no identifier was given entitlements")
+        exit(1)
+    }
+    print("ENTITLEMENTS: self-declared set is keychain groups only")
 }
 
 // Extension identifiers and entitlements: what "the extension is signed

@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use futures_util::future::{try_join, try_join3, try_join_all};
 use idevice::provider::IdeviceProvider;
 use rootcause::{option_ext::OptionExt, prelude::*};
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct Sideloader {
     team_selection: TeamSelection,
@@ -147,10 +147,20 @@ impl Sideloader {
                 }
             );
 
+            // A wildcard profile (`TEAM.*`) already covers any identifier on
+            // the team, so a team made of them needs no App ID per extension.
+            let wildcard_covers_all = team_uses_wildcard_profiles(&mut app_id_session, &team).await;
+            if wildcard_covers_all && app_group {
+                warn!(
+                    "This team's profiles are wildcard ones, so an app group is not granted and \
+                     the app is signed without one"
+                );
+            }
+
             let (mut app_ids, app_group) = try_join(
-                app.register_app_ids(&mut app_id_session, &team),
+                app.register_app_ids(&mut app_id_session, &team, wildcard_covers_all),
                 async {
-                    if !app_group {
+                    if !app_group || wildcard_covers_all {
                         return Ok(None);
                     }
                     group_session
@@ -164,13 +174,16 @@ impl Sideloader {
             let main_app_id = app_ids
                 .iter()
                 .find(|app_id| app_id.identifier == main_app_id_str)
-                .cloned()
-                .ok_or_else(|| {
-                    report!(
-                        "Main app ID {} not found in registered app IDs",
-                        main_app_id_str
-                    )
-                })?;
+            .cloned()
+            .ok_or_else(|| {
+                report!(
+                    "Main app ID {} not found in registered app IDs",
+                    main_app_id_str
+                )
+            })?;
+            // A wildcard team's main App ID is not among the team's App IDs (it
+            // may not exist at all); the profile lookup below only needs an
+            // identifier, and the profile will be the wildcard one.
 
             // Each App ID is configured on its own session, all at once.
             try_join_all(app_ids.iter_mut().map(|app_id| {
@@ -182,9 +195,21 @@ impl Sideloader {
                         session
                             .assign_app_group(team, app_group, app_id, None)
                             .await?;
+                        // The profile is built from the App ID as Apple now
+                        // holds it. Reading it back is what catches a PATCH
+                        // Apple accepted without applying: the profile would
+                        // then lack `application-groups` while the signature
+                        // followed the profile, and the app would be installed
+                        // with a shared container it cannot open.
+                        session
+                            .require_app_group_feature(team, app_id, app_group.identifier.as_str())
+                            .await?;
                     }
                     if increased_memory_limit {
                         session.add_increased_memory_limit(team, app_id).await?;
+                        session
+                            .require_capability(team, app_id, "increasedMemoryLimit")
+                            .await?;
                     }
                     Ok::<(), Report>(())
                 }
@@ -197,6 +222,7 @@ impl Sideloader {
 
         let ((), cert_identity, (mut app, special, group_identifier, main_app_id, app_ids)) =
             try_join3(registration, certificate, bundle).await?;
+
 
         // The profile has to come after the device and App IDs are set up; the
         // certificate goes into the bundle meanwhile.
@@ -216,11 +242,37 @@ impl Sideloader {
             },
             async {
                 let mut profiles = std::collections::HashMap::new();
+                let mut unsigned: Vec<String> = Vec::new();
                 for app_id in &app_ids {
                     let profile = dev_session
                         .download_team_provisioning_profile(&team, app_id, None)
                         .await?;
                     profiles.insert(app_id.identifier.clone(), profile);
+                }
+                // Every App ID is kept on the team, signed or not, so the list
+                // of profiles and the list of App IDs stay in step. A wildcard
+                // team lists App IDs created by other installs; those get no
+                // request, and no extension will be looking one up.
+                let wanted: std::collections::HashSet<&str> = app_ids
+                    .iter()
+                    .map(|app_id| app_id.identifier.as_str())
+                    .collect();
+                for id in app.bundle.collect_nested_bundles().iter().filter_map(|b| {
+                    (b.bundle_dir.extension().and_then(|e| e.to_str()) == Some("appex"))
+                        .then(|| b.bundle_identifier().map(str::to_string))
+                        .flatten()
+                }) {
+                    if !wanted.contains(id.as_str()) && !unsigned.contains(&id) {
+                        unsigned.push(id);
+                    }
+                }
+                if !unsigned.is_empty() {
+                    warn!(
+                        "{} app extension(s) have no App ID of their own and are signed with the \
+                         empty entitlement set: {}",
+                        unsigned.len(),
+                        unsigned.join(", ")
+                    );
                 }
                 info!("Acquired {} provisioning profiles", profiles.len());
                 Ok::<_, Report>(profiles)
@@ -350,3 +402,77 @@ impl Sideloader {
     }
 }
 
+/// Whether every provisioning profile the team currently holds is a wildcard
+/// one (`TEAM.*`).
+///
+/// A wildcard profile covers every identifier on the team, so no App ID has to
+/// be registered for an app or its extensions, and no capability can be granted
+/// on an App ID. Asking for the team's profiles and reading what came back is
+/// the only place the answer exists. An answer that can't be read counts as
+/// "no": the App IDs are then registered the ordinary way, and the profiles
+/// Apple issues are whatever they are.
+async fn team_uses_wildcard_profiles(dev_session: &mut DeveloperSession, team: &DeveloperTeam) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Entry {
+        #[serde(default)]
+        provisioning_profile_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+        #[serde(default)]
+        app_id_id: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listing {
+        #[serde(default)]
+        provisioning_profiles: Vec<Entry>,
+    }
+
+    let body = plist_macro::plist!(dict { "teamId": &team.team_id });
+    let url = crate::dev::device_type::dev_url("listProvisioningProfiles", None);
+    let listed: Result<Listing, _> = dev_session
+        .send_dev_request(&url, body, "provisioningProfileList")
+        .await;
+    let Ok(listing) = listed else {
+        return false;
+    };
+    if listing.provisioning_profiles.is_empty() {
+        return false;
+    }
+    listing
+        .provisioning_profiles
+        .iter()
+        .all(|entry| is_wildcard_profile(entry.kind.as_deref(), entry.name.as_deref()))
+}
+
+fn is_wildcard_profile(kind: Option<&str>, name: Option<&str>) -> bool {
+    if let Some(kind) = kind
+        && kind.to_ascii_uppercase().contains("WILDCARD")
+    {
+        return true;
+    }
+    name.map(|name| name.contains(".*")).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod wildcard_tests {
+    use super::is_wildcard_profile;
+
+    #[test]
+    fn a_dev_profile_named_for_the_team_is_a_wildcard() {
+        assert!(is_wildcard_profile(Some("IOS_APP_DEVELOPMENT"), Some("iOS Team Provisioning Profile: *")));
+        assert!(is_wildcard_profile(None, Some("QH65B2.*")));
+    }
+
+    #[test]
+    fn an_app_specific_profile_is_not() {
+        assert!(!is_wildcard_profile(
+            Some("IOS_APP_DEVELOPMENT"),
+            Some("iOS Team Provisioning Profile: com.example.app")
+        ));
+        assert!(!is_wildcard_profile(None, None));
+    }
+}

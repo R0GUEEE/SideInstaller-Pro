@@ -133,9 +133,19 @@ enum IPAPatch {
 
         // MARK: Entitlements
         // The signature the installer writes carries the profile's entitlements,
-        // so these edits affect only the build’s archived declarations; the
+        // so these edits affect only the build's archived declarations; the
         // vendored signer does not use them as signing entitlements.
-        if !config.entitlements.isEmpty || config.bypassesSideloadDetection {
+        //
+        // The exceptions are keys only the app itself can declare, which no
+        // Apple-issued profile carries: `com.apple.security.application-groups`
+        // belongs in the profile (and is asked for there), but
+        // `keychain-access-groups` is written into the app's own entitlements
+        // by every sideloader, and a hook dylib that shares the app's keychain
+        // needs it in the signature. Those are written on every custom build,
+        // whether or not the user edited anything.
+        let signedBundleID = newBundleID.isEmpty ? (originalBundleID ?? "") : newBundleID
+        let selfDeclared = Self.selfDeclaredEntitlements(for: signedBundleID)
+        if !config.entitlements.isEmpty || config.bypassesSideloadDetection || signedBundleID.isEmpty == false {
             let entitlementsPath = prefix + "archived-expanded-entitlements.xcent"
             var entitlements: [String: Any] = [:]
             if let existing = entries.first(where: { $0.name == entitlementsPath }) {
@@ -144,8 +154,24 @@ enum IPAPatch {
                     throw PatchError.corrupt(entitlementsPath)
                 }
                 entitlements = decoded
+                // A build signed by another team says so in its identifier and
+                // groups; those follow the app to its new name.
+                entitlements = Self.rebasedEntitlements(entitlements,
+                                                        from: originalBundleID ?? "",
+                                                        to: signedBundleID)
+            }
+            // A build that never carried the file (an App Store one) gets the
+            // identifier it is installed under; the rest comes from the
+            // configuration and the profile. Without this the archive has no
+            // declaration at all and only the signature says what the app is.
+            if entitlements["application-identifier"] == nil, !signedBundleID.isEmpty {
+                entitlements["application-identifier"] = signedBundleID
             }
             let originalEntitlements = entitlements as NSDictionary
+            for (key, value) in selfDeclared {
+                entitlements[key] = value
+                outcome.applied.append(L("Entitlement: %@", key))
+            }
             for edit in config.entitlements {
                 guard let value = edit.object else { continue }
                 let key = edit.key.trimmed
@@ -408,6 +434,107 @@ enum IPAPatch {
               let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)
         else { return nil }
         return plist as? [String: Any]
+    }
+
+    /// Entitlements the app declares for itself, which no provisioning profile
+    /// carries or may contradict.
+    ///
+    /// `keychain-access-groups` comes first in the profile's own list and
+    /// includes the app's identifier: that is what iOS lets the app reach its
+    /// keychain through the access group named after its App ID, and it is what
+    /// lets a hook dylib (injected, and therefore signed with the app's
+    /// identity) read the same items. Every sideloader writes it; nothing is
+    /// granted here that the profile does not already allow.
+    ///
+    /// Everything else — app groups, the memory limits, HealthKit, iCloud —
+    /// lives in the profile and must be asked for on the App ID, not declared
+    /// in the archive. Writing one of those here changes no signature and is
+    /// why the entitlements page says so.
+    static func selfDeclaredEntitlements(for bundleID: String) -> [String: Any] {
+        guard !bundleID.isEmpty else { return [:] }
+        return ["keychain-access-groups": [bundleID]]
+    }
+
+    /// Problems that would stop the signed app from being what it looks like:
+    /// checks run on the patched archive just before signing, so a run fails
+    /// with a reason instead of installing something that misbehaves.
+    struct PreSignAudit {
+        var problems: [String] = []
+        var notes: [String] = []
+    }
+
+    /// Checks the archive at `url` against what the signer does with it.
+    ///
+    /// * A build whose `PlugIns` still names two extensions with one
+    ///   `CFBundleIdentifier` cannot be signed: the second would be handed the
+    ///   first one's profile.
+    /// * An extension left without a profile is signed with an empty
+    ///   entitlement set; the signer tolerates it (a `.appex` inside a
+    ///   framework the app already ships), and the note says so.
+    /// * A bundle whose `CFBundleSupportedPlatforms` isn't iOS installs and
+    ///   never launches; that is reported, since nothing in signing catches it.
+    static func auditBeforeSigning(_ url: URL) -> PreSignAudit {
+        var audit = PreSignAudit()
+        guard let archive = IPALibrary.archiveFiles(at: url) else {
+            audit.problems.append(L("That file can't be read as an .ipa."))
+            return audit
+        }
+        guard let app = archive.first(where: {
+            $0.path.hasSuffix("/Info.plist") && $0.path.contains("Payload/")
+                && $0.path.split(separator: "/").count == 3
+        }) else {
+            audit.problems.append(L("The archive has no Payload/<App>.app in it."))
+            return audit
+        }
+        let prefix = String(app.path.dropLast("Info.plist".count))
+        var identifiers: [String: String] = [:]
+        for file in archive where file.path.hasPrefix(prefix) && file.path.hasSuffix("/Info.plist") {
+            guard let data = IPALibrary.contents(of: file, in: url),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
+                    as? [String: Any],
+                  let id = plist["CFBundleIdentifier"] as? String else { continue }
+            if let first = identifiers[id] {
+                audit.problems.append(L("Two bundles share the identifier %@: %@ and %@", id, first, file.path))
+            } else {
+                identifiers[id] = file.path
+            }
+            if let platforms = plist["CFBundleSupportedPlatforms"] as? [String],
+               !platforms.contains("iOS") {
+                audit.notes.append(L("%@ says it supports %@, not iOS", file.path, platforms.joined(separator: ", ")))
+            }
+        }
+        return audit
+    }
+
+    /// An existing `archived-expanded-entitlements.xcent`, re-prefixed for the
+    /// bundle it now belongs to.
+    ///
+    /// The signer does not read this file — the signature carries the profile's
+    /// entitlements — but the archive's own statement of what the app is should
+    /// not contradict it. A differently-signed build carries the prefix it was
+    /// signed under (a paid team's), so the identifier and every group derived
+    /// from it are moved to the new one. Profiles and the keychain items they
+    /// name are left alone.
+    static func rebasedEntitlements(_ entitlements: [String: Any],
+                                    from oldID: String, to newID: String) -> [String: Any] {
+        guard !oldID.isEmpty, !newID.isEmpty, oldID != newID else { return entitlements }
+        var out = entitlements
+        if let identifier = out["application-identifier"] as? String,
+           let team = identifier.split(separator: ".").first, identifier.hasPrefix("\(team).") {
+            out["application-identifier"] = "\(team).\(newID)"
+        }
+        if let groups = out["keychain-access-groups"] as? [String] {
+            out["keychain-access-groups"] = groups.map { group -> String in
+                if group == oldID { return newID }
+                // `TEAM.<old id>.something` follows the app under its new name.
+                if let dot = group.firstIndex(of: "."),
+                   group[group.index(after: dot)...].hasPrefix(oldID + ".") {
+                    return String(group[..<group.index(after: dot)]) + newID + group.dropFirst(group.index(after: dot) + oldID.count)
+                }
+                return group
+            }
+        }
+        return out
     }
 
     /// The entitlements the build declares: its archived `xcent` when there is

@@ -231,7 +231,7 @@ struct InstallSigningPanel: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
             }
-            Text(L("A capability writes the plist key and entitlement the app expects. Whether iOS grants it is still down to the provisioning profile your Apple ID issues."))
+            Text(L("A capability writes the plist key the app expects. The matching entitlement is granted only if it is on the App ID: turn it on under Settings › Entitlements, or sign again with Increased Memory Limit, and the profile Apple issues carries it. An entitlement written here alone is recorded in the archive and changes no signature."))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

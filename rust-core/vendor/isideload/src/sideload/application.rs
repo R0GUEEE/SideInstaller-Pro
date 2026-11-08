@@ -166,8 +166,44 @@ impl Application {
         main_app_bundle_id: &str,
         main_app_id_str: &str,
     ) -> Result<(), Report> {
-        let extensions = self.bundle.app_extensions_mut();
-        for ext in extensions.iter_mut() {
+        // Nested `.appex` bundles were not renamed before: a bundle nested in
+        // an extension kept its old identifier and was signed under an App ID
+        // nobody registered. Every one is renamed here, each relative to its
+        // own parent's new identifier so a grandchild follows its parent.
+        //
+        // The suffix is taken relative to the *original* identifier, because
+        // the App ID the parent gets is its original plus `.TEAMID`: for an
+        // extension `com.a.b.Widget`, `&id[main_app_bundle_id.len()..]` is
+        // `.Widget`, and that is what goes under `com.a.b.TEAMID`.
+        fn visit(bundle: &mut Bundle, prefix_len: usize) -> Result<(), Report> {
+            for ext in bundle.app_extensions_mut().iter_mut() {
+                let Some(id) = ext.bundle_identifier().map(str::to_string) else {
+                    continue;
+                };
+                let Some(suffix) = id.get(prefix_len..).map(str::to_string) else {
+                    bail!(SideloadError::InvalidBundle(format!(
+                        "Extension {} has bundle identifier {}, shorter than its parent's",
+                        ext.bundle_name().unwrap_or("Unknown"),
+                        id
+                    )));
+                };
+                let parent_id = bundle.bundle_identifier().unwrap_or_default().to_string();
+                // A build whose extension was already re-prefixed (a second
+                // pass over a patched IPA) is left as it is.
+                let new_id = if id.starts_with(&format!("{parent_id}.")) {
+                    id.clone()
+                } else {
+                    format!("{parent_id}{suffix}")
+                };
+                ext.set_bundle_identifier(&new_id);
+                visit(ext, prefix_len)?;
+            }
+            Ok(())
+        }
+        // Rename from the root down: the root already carries the new
+        // identifier before its children are visited. `main_app_bundle_id` is
+        // only used to reject an extension that is not under the app at all.
+        for ext in self.bundle.app_extensions() {
             if let Some(id) = ext.bundle_identifier() {
                 if !is_child_bundle_id(main_app_bundle_id, id) {
                     bail!(SideloadError::InvalidBundle(format!(
@@ -175,26 +211,26 @@ impl Application {
                         ext.bundle_name().unwrap_or("Unknown"),
                         id, main_app_bundle_id
                     )));
-                } else {
-                    ext.set_bundle_identifier(&format!(
-                        "{}{}",
-                        main_app_id_str,
-                        &id[main_app_bundle_id.len()..]
-                    ));
                 }
             }
         }
         self.bundle.set_bundle_identifier(main_app_id_str);
+        visit(&mut self.bundle, main_app_bundle_id.len())?;
 
         Ok(())
     }
 
     /// Register a distinct App ID for the main app and every retained extension.
     /// Each executable bundle needs a provisioning profile authorizing its identity.
+    ///
+    /// When the team's profiles are wildcard ones (`TEAM.*`), every App ID is
+    /// already covered and nothing is registered: a free Apple ID has ten, and
+    /// a wildcard team profile would use one per extension for nothing.
     pub async fn register_app_ids(
         &self,
         dev_session: &mut DeveloperSession,
         team: &DeveloperTeam,
+        wildcard_covers_all: bool,
     ) -> Result<Vec<AppId>, Report> {
         let nested = self.bundle.collect_nested_bundles();
         let bundles_with_app_id: Vec<_> = std::iter::once(&self.bundle)
@@ -207,6 +243,22 @@ impl Application {
             .list_app_ids(team, None)
             .await
             .context("Failed to list app IDs for the developer team")?;
+
+        if wildcard_covers_all {
+            info!(
+                "The team's profiles are wildcard ones; no App IDs are registered for this app"
+            );
+            let ids: Vec<String> = bundles_with_app_id
+                .iter()
+                .filter_map(|b| b.bundle_identifier().map(str::to_string))
+                .collect();
+            return Ok(list_app_ids_response
+                .app_ids
+                .into_iter()
+                .filter(|app_id| ids.iter().any(|id| *id == app_id.identifier))
+                .collect());
+        }
+
         let app_ids_to_register = bundles_with_app_id
             .iter()
             .filter(|bundle| {
