@@ -1,7 +1,7 @@
 use crate::{
     dev::{
         app_groups::AppGroupsApi,
-        app_ids::AppIdsApi,
+        app_ids::{AppIdVerification, AppIdsApi},
         developer_session::DeveloperSession,
         devices::DevicesApi,
         teams::{DeveloperTeam, TeamsApi},

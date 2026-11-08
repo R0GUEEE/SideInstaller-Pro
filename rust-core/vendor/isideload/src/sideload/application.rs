@@ -176,6 +176,9 @@ impl Application {
         // extension `com.a.b.Widget`, `&id[main_app_bundle_id.len()..]` is
         // `.Widget`, and that is what goes under `com.a.b.TEAMID`.
         fn visit(bundle: &mut Bundle, prefix_len: usize) -> Result<(), Report> {
+            // Taken before the extensions are borrowed mutably: the new
+            // identifier of every child is built from its parent's.
+            let parent_id = bundle.bundle_identifier().unwrap_or_default().to_string();
             for ext in bundle.app_extensions_mut().iter_mut() {
                 let Some(id) = ext.bundle_identifier().map(str::to_string) else {
                     continue;
@@ -187,7 +190,6 @@ impl Application {
                         id
                     )));
                 };
-                let parent_id = bundle.bundle_identifier().unwrap_or_default().to_string();
                 // A build whose extension was already re-prefixed (a second
                 // pass over a patched IPA) is left as it is.
                 let new_id = if id.starts_with(&format!("{parent_id}.")) {
