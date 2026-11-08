@@ -195,6 +195,7 @@ keys=$(plutil -convert json -o - "$WORK/lib.ent.plist" 2>/dev/null | tr -d '{} '
 ok "$(basename "$LIB") signed with an empty entitlement set"
 
 echo "==> the profiles are sealed into CodeResources"
+plutil -p "$APP/_CodeSignature/CodeResources" | sed -n '1,30p'
 plutil -extract 'files.embedded.mobileprovision' raw "$APP/_CodeSignature/CodeResources" >/dev/null ||
   fail "embedded.mobileprovision is not sealed in the app's CodeResources"
 plutil -extract 'files.embedded.mobileprovision' raw "$APP/PlugIns/Widget.appex/_CodeSignature/CodeResources" >/dev/null ||
