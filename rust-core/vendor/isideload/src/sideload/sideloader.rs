@@ -226,6 +226,16 @@ impl Sideloader {
 
         // The profile has to come after the device and App IDs are set up; the
         // certificate goes into the bundle meanwhile.
+        //
+        // The extensions' identifiers are read here, before both branches
+        // borrow: one mutates the bundle, the other only needs the list.
+        let extension_ids: Vec<String> = app
+            .bundle
+            .collect_nested_bundles()
+            .iter()
+            .filter(|b| b.bundle_dir.extension().and_then(|e| e.to_str()) == Some("appex"))
+            .filter_map(|b| b.bundle_identifier().map(str::to_string))
+            .collect();
         let dev_session = &mut self.dev_session;
         let ((), profiles) = try_join(
             async {
@@ -257,11 +267,7 @@ impl Sideloader {
                     .iter()
                     .map(|app_id| app_id.identifier.as_str())
                     .collect();
-                for id in app.bundle.collect_nested_bundles().iter().filter_map(|b| {
-                    (b.bundle_dir.extension().and_then(|e| e.to_str()) == Some("appex"))
-                        .then(|| b.bundle_identifier().map(str::to_string))
-                        .flatten()
-                }) {
+                for id in extension_ids {
                     if !wanted.contains(id.as_str()) && !unsigned.contains(&id) {
                         unsigned.push(id);
                     }
