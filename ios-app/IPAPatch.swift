@@ -519,17 +519,25 @@ enum IPAPatch {
                                     from oldID: String, to newID: String) -> [String: Any] {
         guard !oldID.isEmpty, !newID.isEmpty, oldID != newID else { return entitlements }
         var out = entitlements
-        if let identifier = out["application-identifier"] as? String,
-           let team = identifier.split(separator: ".").first, identifier.hasPrefix("\(team).") {
-            out["application-identifier"] = "\(team).\(newID)"
+        if let identifier = out["application-identifier"] as? String {
+            // `TEAMID.<app>`: the team half stays, the identifier moves.
+            let parts = identifier.split(separator: ".", maxSplits: 1)
+            if parts.count == 2 {
+                out["application-identifier"] = String(parts[0]) + "." + newID
+            }
         }
         if let groups = out["keychain-access-groups"] as? [String] {
             out["keychain-access-groups"] = groups.map { group -> String in
                 if group == oldID { return newID }
-                // `TEAM.<old id>.something` follows the app under its new name.
-                if let dot = group.firstIndex(of: "."),
-                   group[group.index(after: dot)...].hasPrefix(oldID + ".") {
-                    return String(group[..<group.index(after: dot)]) + newID + group.dropFirst(group.index(after: dot) + oldID.count)
+                // `TEAM.<old id>` and `TEAM.<old id>.something` follow the app
+                // under its new name; anything else is left alone.
+                let parts = group.split(separator: ".", maxSplits: 1)
+                guard parts.count == 2 else { return group }
+                let team = String(parts[0])
+                let rest = String(parts[1])
+                if rest == oldID { return team + "." + newID }
+                if rest.hasPrefix(oldID + ".") {
+                    return team + "." + newID + rest.dropFirst(oldID.count)
                 }
                 return group
             }
