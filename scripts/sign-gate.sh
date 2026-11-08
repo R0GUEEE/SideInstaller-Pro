@@ -182,16 +182,17 @@ for pair in "PlugIns/Widget.appex:$WIDGET_ID:widget" "PlugIns/Share.appex:$SHARE
 done
 
 echo "==> libraries carry no entitlements"
-for lib in "Frameworks/Till.framework/Till"; do
-  [ "$(value "codesigned[Frameworks/Till.framework]")" = "true" ] ||
-    fail "the framework bundle was not sealed"
-  [ "$(value "embedded_sha256[Frameworks/Till.framework]")" = "none" ] ||
-    fail "the framework was given a profile"
-  ent="$(codesign -d --entitlements :- "$APP/$lib" 2>/dev/null | tr -d '\n\t ' || true)"
-  [ -z "$ent" ] || [ "$ent" = "<?xmlversion=\"1.0\"encoding=\"UTF-8\"?><plistversion=\"1.0\"><dict/></plist>" ] ||
-    fail "$lib carries entitlements: $ent"
-  ok "$lib signed with none"
-done
+LIB="$APP/Frameworks/Till.framework/Till"
+[ "$(value "codesigned[Frameworks/Till.framework]")" = "true" ] ||
+  fail "the framework bundle was not sealed"
+[ "$(value "embedded_sha256[Frameworks/Till.framework]")" = "none" ] ||
+  fail "the framework was given a profile"
+codesign -d --entitlements :- "$LIB" 2>/dev/null > "$WORK/lib.ent.plist" || true
+# An empty dictionary is what a library must carry: anything with a key in it
+# is an entitlement the profile never granted.
+keys=$(plutil -convert json -o - "$WORK/lib.ent.plist" 2>/dev/null | tr -d '{} ' || true)
+[ -z "$keys" ] || fail "$(basename "$LIB") carries entitlements: $keys"
+ok "$(basename "$LIB") signed with an empty entitlement set"
 
 echo "==> the profiles are sealed into CodeResources"
 plutil -extract 'files.embedded.mobileprovision' raw "$APP/_CodeSignature/CodeResources" >/dev/null ||
