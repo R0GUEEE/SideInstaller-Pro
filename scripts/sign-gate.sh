@@ -183,7 +183,10 @@ done
 
 echo "==> libraries carry no entitlements"
 for lib in "Frameworks/Till.framework/Till"; do
-  [ "$(value "codesigned[$lib]")" = "true" ] || fail "$lib was not signed"
+  [ "$(value "codesigned[Frameworks/Till.framework]")" = "true" ] ||
+    fail "the framework bundle was not sealed"
+  [ "$(value "embedded_sha256[Frameworks/Till.framework]")" = "none" ] ||
+    fail "the framework was given a profile"
   ent="$(codesign -d --entitlements :- "$APP/$lib" 2>/dev/null | tr -d '\n\t ' || true)"
   [ -z "$ent" ] || [ "$ent" = "<?xmlversion=\"1.0\"encoding=\"UTF-8\"?><plistversion=\"1.0\"><dict/></plist>" ] ||
     fail "$lib carries entitlements: $ent"
