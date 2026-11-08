@@ -144,7 +144,8 @@ PROFILE_ARGS=("$WIDGET_ID=$WORK/widget.mobileprovision" "$SHARE_ID=$WORK/share.m
 ( cd rust-core && cargo run --example sign_gate -q -- "$APP" "$WORK/key.pem" "$WORK/cert.der" - \
   "$WORK/app.mobileprovision" "${PROFILE_ARGS[@]}" ) | tee "$WORK/report.txt"
 
-value() { sed -n "s/^$1=//p" "$WORK/report.txt" | head -1; }
+# `awk -F=` so the keys' `[` `]` are never read as a regex.
+value() { awk -v k="$1" -F= '$1 == k { sub($1 "=", ""); print; exit }' "$WORK/report.txt"; }
 
 # --- assertions --------------------------------------------------------------
 echo "==> the report the signer wrote"
