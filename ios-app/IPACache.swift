@@ -49,6 +49,7 @@ enum IPACache {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let destination = file(for: bundleID)
             let temporary = destination.appendingPathExtension("incoming")
+            defer { try? FileManager.default.removeItem(at: temporary) }
             try? FileManager.default.removeItem(at: temporary)
             try FileManager.default.copyItem(at: ipa, to: temporary)
             // Replace atomically, so a crash mid-copy can't leave a half file

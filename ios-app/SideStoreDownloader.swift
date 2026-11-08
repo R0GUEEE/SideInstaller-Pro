@@ -783,9 +783,11 @@ enum SideStoreDownloader {
                     try FileManager.default.moveItem(at: file, to: dest)
                     cont.resume(returning: dest)
                 } catch let urlError as URLError {
+                    try? FileManager.default.removeItem(at: staging)
                     cont.resume(throwing: urlError.code == .cancelled
                                 ? CancellationError() : DownloadError.unreachable(urlError))
                 } catch {
+                    try? FileManager.default.removeItem(at: staging)
                     cont.resume(throwing: error)
                 }
             }
@@ -1660,3 +1662,4 @@ enum DownloadLedger {
         etags = e
     }
 }
+

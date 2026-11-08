@@ -61,15 +61,18 @@ final class InstallQueue: ObservableObject {
     func remove(_ id: UUID) {
         guard !isRunning else { return }
         items.removeAll { $0.id == id }
+        BulkInstallStage.prune(keeping: items.map(\.url))
     }
 
     func clearFinished() {
         items.removeAll { $0.isFinished }
+        BulkInstallStage.prune(keeping: items.map(\.url))
     }
 
     func clearAll() {
         guard !isRunning else { return }
         items.removeAll()
+        BulkInstallStage.prune(keeping: [])
     }
 
     /// Starts the line. Does nothing when it's already running or empty.
@@ -108,6 +111,9 @@ final class InstallQueue: ObservableObject {
             if let index = items.firstIndex(where: { $0.id == next.id }) {
                 items[index].state = result
             }
+            // Successful staged copies are redundant after the engine cached the IPA.
+            // Failed copies stay available until removed or the next launch.
+            BulkInstallStage.prune(keeping: items.filter { $0.state != .done }.map(\.url))
             if Task.isCancelled { break }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
@@ -132,7 +138,7 @@ final class InstallHistory: ObservableObject {
         let version: String?
         /// Where the copy is, relative to the app container. Stored so a change
         /// in container paths between launches doesn't break old records.
-        let cachedPath: String?
+        var cachedPath: String?
         let date: Date
         /// Where it came from, for the row: a source's name, "imported", a queue…
         let origin: String?
@@ -165,27 +171,60 @@ final class InstallHistory: ObservableObject {
            Date().timeIntervalSince(last.date) < 60 {
             return
         }
-        let snapshot = cached.flatMap { try? InstallHistoryArchive.store($0) }
+        let snapshot = cached.flatMap { source -> URL? in
+            let attributes = try? FileManager.default.attributesOfItem(atPath: source.path)
+            guard let bytes = (attributes?[.size] as? NSNumber)?.int64Value,
+                  bytes <= 256 * 1_024 * 1_024 else { return nil }
+            // Make room before copying, so a new snapshot cannot double the budget.
+            trimStorage(maxBytes: 256 * 1_024 * 1_024 - bytes)
+            return try? InstallHistoryArchive.store(source)
+        }
         let entry = Entry(id: UUID(), bundleID: bundleID, name: name, version: version,
                           cachedPath: snapshot?.lastPathComponent, date: Date(), origin: origin)
         entries.insert(entry, at: 0)
         if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
         save()
-        InstallHistoryArchive.prune(keeping: entries.compactMap(\.cachedPath))
+        trimStorage()
     }
 
     /// The newest earlier build of `bundleID` that's still on disk — what a roll
     /// back would install.
     func previousBuild(of bundleID: String) -> Entry? {
-        entries.filter { $0.bundleID == bundleID && $0.cachedURL != nil }
+        entries.filter { $0.bundleID == bundleID }
             .dropFirst()
-            .first
+            .first { $0.cachedURL != nil }
     }
 
     func clear() {
         entries.removeAll()
         save()
         InstallHistoryArchive.prune(keeping: [])
+    }
+
+    /// The activity log survives eviction; only its optional IPA snapshots go.
+    /// Latest snapshots win a global budget, with at most two per app for seven days.
+    func trimStorage(now: Date = Date(), maxBytes: Int64 = 256 * 1_024 * 1_024,
+                     maxAge: TimeInterval = 7 * 86_400, copiesPerApp: Int = 2) {
+        var remaining = max(0, maxBytes)
+        var counts: [String: Int] = [:]
+        for index in entries.indices {
+            let entry = entries[index]
+            guard let url = entry.cachedURL else {
+                entries[index].cachedPath = nil
+                continue
+            }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attributes?[.size] as? NSNumber)?.int64Value ?? Int64.max
+            if now.timeIntervalSince(entry.date) <= maxAge,
+               counts[entry.bundleID, default: 0] < copiesPerApp, size <= remaining {
+                remaining -= size
+                counts[entry.bundleID, default: 0] += 1
+            } else {
+                entries[index].cachedPath = nil
+            }
+        }
+        save()
+        InstallHistoryArchive.prune(keeping: entries.compactMap(\.cachedPath))
     }
 
     private func save() {

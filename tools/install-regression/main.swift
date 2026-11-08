@@ -94,6 +94,39 @@ enum TestError: Error { case installFailed }
         assert(!fm.fileExists(atPath: old.path))
         assert(fm.fileExists(atPath: cache.url.path))
 
+        // A budget eviction removes bytes, not the activity record or latest cache.
+        history.record(bundleID: id, name: "Test", version: "1", cached: first, origin: nil)
+        history.record(bundleID: id, name: "Test", version: "2", cached: second, origin: nil)
+        history.record(bundleID: id, name: "Test", version: "3", cached: second, origin: nil)
+        assert(history.entries.filter { $0.cachedURL != nil }.count == 2)
+        history.trimStorage(maxBytes: 11)
+        assert(history.entries.count == 3)
+        assert(history.entries.filter { $0.cachedURL != nil }.count == 1)
+        assert(fm.fileExists(atPath: cache.url.path))
+        history.trimStorage(now: Date().addingTimeInterval(8 * 86_400))
+        assert(history.entries.allSatisfy { $0.cachedURL == nil })
+        history.clear()
+
+        let sweep = work.appendingPathComponent("sweep")
+        try fm.createDirectory(at: sweep, withIntermediateDirectories: true)
+        for name in ["ipa-link-old", "ipa-link-fresh", "App_extracted", "important.plist", "patch-old.ipa"] {
+            let url = sweep.appendingPathComponent(name)
+            try Data("fixture".utf8).write(to: url)
+            if name != "ipa-link-fresh" {
+                try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-2 * 86_400)], ofItemAtPath: url.path)
+            }
+        }
+        StorageMaintenance.cleanStaleTemporaryFiles(in: sweep)
+        try check(Set(fm.contentsOfDirectory(atPath: sweep.path)) == Set(["ipa-link-fresh", "important.plist"]))
+        for name in ["app.ipa", "app.ipa.name", "old.ipa.incoming", "missing.ipa.name"] {
+            try Data("fixture".utf8).write(to: sweep.appendingPathComponent(name))
+        }
+        StorageMaintenance.cleanCacheDebris(in: sweep)
+        assert(fm.fileExists(atPath: sweep.appendingPathComponent("app.ipa").path))
+        assert(fm.fileExists(atPath: sweep.appendingPathComponent("app.ipa.name").path))
+        assert(!fm.fileExists(atPath: sweep.appendingPathComponent("old.ipa.incoming").path))
+        assert(!fm.fileExists(atPath: sweep.appendingPathComponent("missing.ipa.name").path))
+
         let another = work.appendingPathComponent("other")
         try fm.createDirectory(at: another, withIntermediateDirectories: true)
         let sameName = another.appendingPathComponent(first.lastPathComponent)
@@ -154,6 +187,6 @@ enum TestError: Error { case installFailed }
         for item in cancelled.items {
             if case .failed = item.state {} else { fatalError("Cancelled install marked successful") }
         }
-        print("PASS: first cache, replacement, immutable rollback, staging collisions, cache-safe cleanup, queue completion and cancellation")
+        print("PASS: automatic cleanup budgets/age/protection, first cache, replacement, immutable rollback, staging collisions, cache-safe cleanup, queue completion and cancellation")
     }
 }

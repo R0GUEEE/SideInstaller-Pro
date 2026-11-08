@@ -781,6 +781,10 @@ final class Engine: ObservableObject {
             // next install from inheriting another app's identity, capabilities
             // and tweaks.
             AppConfigStore.shared.clearAfterInstall()
+            if lastInstallSucceeded, let signed = signedAppPath {
+                Self.discardSignedBundle(at: signed)
+                signedAppPath = nil
+            }
             isRunning = false
             isCancelling = false
             pairingPIN = nil
@@ -2148,7 +2152,8 @@ final class Engine: ObservableObject {
                                      version: info.version,
                                      cached: url,
                                      origin: installSource.displayName)
-        IPACache.prune()
+        // Retain the latest re-signing copy; only disposable history is budgeted.
+        InstallHistory.shared.trimStorage()
         // One build per app on disk: an older download of the same app is of no
         // use once this one is installed, and it is what fills the phone up.
         let cleaned = DownloadsManager.keepNewestOnly()

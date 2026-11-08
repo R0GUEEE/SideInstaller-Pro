@@ -17,6 +17,8 @@ struct SideInstallerApp: App {
     @AppStorage("hasCompletedAccountSetup") private var hasCompletedAccountSetup = false
 
     init() {
+        // Run before background services start: no live operation owns these leftovers.
+        StorageMaintenance.atLaunch()
         // A pairing code still up from a run that was killed means nothing now.
         PairingLiveActivity.shared.endLeftovers()
         PairingNotification.shared.reset()
@@ -97,3 +99,4 @@ struct SideInstallerApp: App {
         }
     }
 }
+
