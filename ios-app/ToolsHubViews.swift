@@ -8,7 +8,7 @@ import SwiftUI
 enum ToolDestination: String, Identifiable, Hashable {
     case device, location, keepAlive
     case certificates, entitlements, pairing, sideBySide
-    case history, storedBuilds, injectedLibraries, inspectIPA
+    case history, storedBuilds, appFiles, injectedLibraries, inspectIPA
     case sources, tweakBrowser, tweakLibrary
     case settings, report, about
 
@@ -359,6 +359,11 @@ struct ToolsView: View {
                       detail: storedDetail,
                       icon: "internaldrive.fill",
                       destination: .storedBuilds),
+            ToolEntry(id: "appFiles",
+                      title: L("App files & storage"),
+                      detail: L("Browse accessible app folders and clear data"),
+                      icon: "folder.badge.gearshape",
+                      destination: .appFiles),
             ToolEntry(id: "injected",
                       title: L("Injected libraries"),
                       detail: L("See, and strip, what a build loads"),
@@ -491,6 +496,7 @@ struct ToolsView: View {
         case .sideBySide:       SideBySideView(manager: sideBySideManager)
         case .history:          InstallHistoryView()
         case .storedBuilds:     IPACacheView()
+        case .appFiles:         AppFilesView()
         case .injectedLibraries: TweakManagerView()
         case .inspectIPA:       IPAInspectorView()
         case .sources:          SourceManagerView(store: sourceStore)
@@ -502,3 +508,4 @@ struct ToolsView: View {
         }
     }
 }
+

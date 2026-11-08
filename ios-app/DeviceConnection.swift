@@ -1984,3 +1984,109 @@ private let installProgressCb: @convention(c) (UInt64, UnsafeMutableRawPointer?)
         Engine.shared.log("install progress: \(progress)%")
     }
 }
+
+
+extension DeviceConnection {
+    /// Probe each permission independently: a failed vend consumes its client.
+    func appFileAccess(_ bundleID: String) throws -> Bool {
+        do {
+            return try withAppContainer(bundleID, reachingLibrary: true) { afc in
+                _ = try appFileNames(afc, path: "/")
+                return true
+            }
+        } catch {
+            return try withAppContainer(bundleID, reachingLibrary: false) { afc in
+                _ = try appFileNames(afc, path: "/Documents")
+                return false
+            }
+        }
+    }
+
+    func appFiles(_ bundleID: String, full: Bool, path: String) throws -> [AppFileEntry] {
+        try withAppContainer(bundleID, reachingLibrary: full) { afc in
+            try validateAppDirectory(afc, path: path, root: full ? "/" : "/Documents")
+            let names = try appFileNames(afc, path: path)
+            guard names.count <= 10000 else { throw fail("Folder exceeds the 10,000 entry browsing limit.") }
+            return try names.map { name in
+                guard let child = AppFilePath.child(name, of: path) else { throw fail("Invalid file name returned by device.") }
+                return try appFileInfo(afc, path: child)
+            }.sorted {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        }
+    }
+
+    /// Deletes contents without following symlinks. No container or system root
+    /// can be removed; cleanup preserves the Documents/Caches/tmp directories.
+    func deleteAppFiles(_ bundleID: String, full: Bool, path: String, contentsOnly: Bool) throws {
+        let root = full ? "/" : "/Documents"
+        guard bundleID != Bundle.main.bundleIdentifier else { throw fail("Use Stored builds to clean SideInstaller's storage.") }
+        guard AppFilePath.valid(path, root: root),
+              contentsOnly ? ["/Documents", "/Library/Caches", "/tmp"].contains(path)
+                           : AppFilePath.deletable(path, root: root) else { throw fail("Protected storage path.") }
+        try withAppContainer(bundleID, reachingLibrary: full) { afc in
+            let parent = (path as NSString).deletingLastPathComponent
+            try validateAppDirectory(afc, path: parent, root: "/")
+            var remaining = 10000
+            let deadline = Date().addingTimeInterval(30)
+            func remove(_ target: String, depth: Int) throws {
+                remaining -= 1
+                guard remaining >= 0, depth < 64, Date() < deadline else {
+                    throw fail("Cleanup limit reached. Some files may already be deleted; refresh and retry.")
+                }
+                let info = try appFileInfo(afc, path: target)
+                if info.isDirectory {
+                    try validateAppDirectory(afc, path: target, root: root)
+                    for name in try appFileNames(afc, path: target) {
+                        guard let child = AppFilePath.child(name, of: target) else { throw fail("Invalid file name.") }
+                        try remove(child, depth: depth + 1)
+                    }
+                }
+                try check(target.withCString { afc_remove_path(afc, $0) }, "Could not delete \(target)")
+            }
+            if contentsOnly {
+                try validateAppDirectory(afc, path: path, root: root)
+                for name in try appFileNames(afc, path: path) {
+                    guard let child = AppFilePath.child(name, of: path) else { throw fail("Invalid file name.") }
+                    try remove(child, depth: 0)
+                }
+            } else {
+                try remove(path, depth: 0)
+            }
+        }
+    }
+
+    private func validateAppDirectory(_ afc: OpaquePointer, path: String, root: String) throws {
+        guard AppFilePath.valid(path, root: root) else { throw fail("Path is outside accessible storage.") }
+        var current = ""
+        for component in path.split(separator: "/") {
+            current += "/" + component
+            guard try appFileInfo(afc, path: current).isDirectory else {
+                throw fail("Cannot traverse a symbolic link or non-directory: \(current)")
+            }
+        }
+    }
+
+    private func appFileInfo(_ afc: OpaquePointer, path: String) throws -> AppFileEntry {
+        var info = AfcFileInfo()
+        try check(path.withCString { afc_get_file_info(afc, $0, &info) }, "Could not read \(path)")
+        defer { afc_file_info_free(&info) }
+        return AppFileEntry(path: path, name: (path as NSString).lastPathComponent,
+                            size: Int64(clamping: info.size),
+                            kind: info.st_ifmt.map { String(cString: $0) } ?? "unknown")
+    }
+
+    private func appFileNames(_ afc: OpaquePointer, path: String) throws -> [String] {
+        var entries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var count = 0
+        try check(path.withCString { afc_list_directory(afc, $0, &entries, &count) }, "Could not list \(path)")
+        guard let entries else { return [] }
+        defer {
+            for i in 0..<count { if let entry = entries[i] { idevice_string_free(entry) } }
+            free(entries)
+        }
+        return (0..<count).compactMap { entries[$0].map { String(cString: $0) } }
+            .filter { $0 != "." && $0 != ".." }
+    }
+}

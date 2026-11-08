@@ -7,6 +7,7 @@ on:
       - 'ios-app/**'
       - 'rust-core/**'
       - 'tools/install-regression/**'
+      - 'tools/app-files-regression/**'
       - '.github/workflows/build-latest.yml'
       - 'project.yml'
       - 'build-rust.sh'
@@ -35,6 +36,11 @@ jobs:
         run: |
           xcrun swiftc -parse-as-library ios-app/IPACache.swift ios-app/InstallQueue.swift ios-app/DownloadsManager.swift ios-app/StorageMaintenance.swift tools/install-regression/main.swift -o "$RUNNER_TEMP/install-regression"
           "$RUNNER_TEMP/install-regression"
+
+      - name: Exercise app storage path safety
+        run: |
+          xcrun swiftc -parse-as-library ios-app/AppFilePath.swift tools/app-files-regression/main.swift -o "$RUNNER_TEMP/app-files-regression"
+          "$RUNNER_TEMP/app-files-regression"
 
   build:
     needs: regression
