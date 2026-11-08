@@ -30,15 +30,53 @@ fn read_der(path: &str) -> Vec<u8> {
     fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
+/// The DER inside a PEM file, or the bytes as they are.
+///
+/// The key the app signs with is stored in a PKCS#12, and openssl writes it out
+/// as PEM; `RustCryptoCmsSigner::from_der` wants the DER body.
+fn read_der_or_pem(path: &str) -> Vec<u8> {
+    let raw = fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let text = String::from_utf8_lossy(&raw);
+    if !text.contains("-----BEGIN") {
+        return raw;
+    }
+    let body: String = text
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    base64_decode(&compact).unwrap_or_else(|| panic!("{path}: not base64"))
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for ch in text.bytes() {
+        if ch == b'=' {
+            break;
+        }
+        let value = TABLE.iter().position(|&c| c == ch)? as u32;
+        acc = (acc << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         return Err("usage: sign_gate <app.app> <key.der> <cert.der> <chain.der|-> <main.mobileprovision> [<bundle-id>=<profile> ...]".into());
     }
     let app = PathBuf::from(&args[0]);
-    let key = read_der(&args[1]);
-    let cert = read_der(&args[2]);
-    let chain = if args[3] == "-" { Vec::new() } else { read_der(&args[3]) };
+    let key = read_der_or_pem(&args[1]);
+    let cert = read_der_or_pem(&args[2]);
+    let chain = if args[3] == "-" { Vec::new() } else { read_der_or_pem(&args[3]) };
     let main_profile_der = fs::read(&args[4]).map_err(|e| format!("{}: {e}", args[4]))?;
     let profiles_from = 5;
 
