@@ -122,8 +122,8 @@ cp "$WORK/hello" "$APP/Frameworks/Till.app.framework/Till.app"
 # --- sign --------------------------------------------------------------------
 echo "==> signing the fixture"
 PROFILE_ARGS=("$WIDGET_ID=$WORK/widget.mobileprovision" "$SHARE_ID=$WORK/share.mobileprovision")
-cargo run --example sign_gate -q -- "$APP" "$WORK/key.pem" "$WORK/cert.der" - \
-  "$WORK/app.mobileprovision" "${PROFILE_ARGS[@]}" | tee "$WORK/report.txt"
+( cd rust-core && cargo run --example sign_gate -q -- "$APP" "$WORK/key.pem" "$WORK/cert.der" - \
+  "$WORK/app.mobileprovision" "${PROFILE_ARGS[@]}" ) | tee "$WORK/report.txt"
 
 value() { sed -n "s/^$1=//p" "$WORK/report.txt" | head -1; }
 
