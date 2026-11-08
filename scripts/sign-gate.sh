@@ -91,8 +91,7 @@ make_profile "Fixture Share" "$SHARE_ID" "$WORK/share.mobileprovision"
 
 # --- fixture app -------------------------------------------------------------
 mkdir -p "$WORK/fixture/Payload/Fixture.app/PlugIns/Widget.appex" \
-         "$WORK/fixture/Payload/Fixture.app/PlugIns/Share.appex" \
-         "$WORK/fixture/Payload/Fixture.app/Frameworks/Till.app.framework"
+         "$WORK/fixture/Payload/Fixture.app/PlugIns/Share.appex"
 
 # A real arm64 Mach-O, so the signature lands in a __LINKEDIT segment.
 cat > "$WORK/hello.c" <<'C'
@@ -132,9 +131,12 @@ cp "$WORK/hello" "$APP/PlugIns/Widget.appex/Widget"
 make_info "$APP/PlugIns/Share.appex/Info.plist" "$SHARE_ID" Share XPC!
 cp "$WORK/hello" "$APP/PlugIns/Share.appex/Share"
 
-# A framework with no Info.plist of its own, and a hand-made dylib inside it:
-# both are libraries, and neither may carry entitlements.
-cp "$WORK/hello" "$APP/Frameworks/Till.app.framework/Till.app"
+# A framework bundle with its own Info.plist and a Mach-O inside it: nested
+# code the signer seals and signs, and which may not carry entitlements.
+FW="$APP/Frameworks/Till.framework"
+mkdir -p "$FW"
+make_info "$FW/Info.plist" "com.example.fixture.Till" Till FMWK
+cp "$WORK/hello" "$FW/Till"
 
 # --- sign --------------------------------------------------------------------
 echo "==> signing the fixture"
@@ -179,7 +181,7 @@ for pair in "PlugIns/Widget.appex:$WIDGET_ID:widget" "PlugIns/Share.appex:$SHARE
 done
 
 echo "==> libraries carry no entitlements"
-for lib in "Frameworks/Till.app.framework/Till.app"; do
+for lib in "Frameworks/Till.framework/Till"; do
   [ "$(value "codesigned[$lib]")" = "true" ] || fail "$lib was not signed"
   ent="$(codesign -d --entitlements :- "$APP/$lib" 2>/dev/null | tr -d '\n\t ' || true)"
   [ -z "$ent" ] || [ "$ent" = "<?xmlversion=\"1.0\"encoding=\"UTF-8\"?><plistversion=\"1.0\"><dict/></plist>" ] ||
