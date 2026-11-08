@@ -1,0 +1,90 @@
+name: build-latest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios-app/**'
+      - 'rust-core/**'
+      - 'tools/install-regression/**'
+      - '.github/workflows/build-latest.yml'
+      - 'project.yml'
+      - 'build-rust.sh'
+      - 'scripts/build-ipa.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-latest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  regression:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse all app sources
+        run: |
+          for file in ios-app/*.swift ios-live-activity/*.swift; do
+            xcrun swiftc -parse "$file" || exit 1
+          done
+      - name: Exercise installation queue and storage
+        run: |
+          xcrun swiftc -parse-as-library ios-app/IPACache.swift ios-app/InstallQueue.swift tools/install-regression/main.swift -o "$RUNNER_TEMP/install-regression"
+          "$RUNNER_TEMP/install-regression"
+
+  build:
+    needs: regression
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      XCODE_VERSION: '27.1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode and install tools
+        run: |
+          set -euo pipefail
+          app="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [[ ! -d "$app" ]]; then
+            app="$(xcode-select -p)"
+            app="${app%/Contents/Developer}"
+          fi
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          command -v xcodegen >/dev/null || brew install xcodegen
+          rustup target add aarch64-apple-ios
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust-core/target
+          key: cargo-latest-${{ hashFiles('rust-core/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-latest-${{ hashFiles('rust-core/Cargo.lock') }}-
+            cargo-ios-
+      - name: Test App ID accounting
+        working-directory: rust-core
+        run: cargo test --locked --lib account::app_id_quota_tests
+      - name: Build unsigned IPA
+        env:
+          OUTPUT: ${{ runner.temp }}/ipa/SideInstaller.ipa
+          DERIVED_DATA: ${{ runner.temp }}/DerivedData
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash scripts/build-ipa.sh
+      - name: Validate IPA archive
+        run: |
+          unzip -tq "$RUNNER_TEMP/ipa/SideInstaller.ipa"
+          shasum -a 256 "$RUNNER_TEMP/ipa/SideInstaller.ipa" | tee "$RUNNER_TEMP/ipa/SHA256.txt"
+          echo "Built from $GITHUB_SHA" > "$RUNNER_TEMP/ipa/COMMIT.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideInstaller-Pro-${{ github.sha }}-unsigned
+          path: ${{ runner.temp }}/ipa/*
+          if-no-files-found: error
+          retention-days: 30

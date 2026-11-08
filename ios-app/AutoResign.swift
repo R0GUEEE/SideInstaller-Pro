@@ -62,6 +62,10 @@ final class AutoResign: ObservableObject {
     }
 
     private func handle(_ task: BGAppRefreshTask) async {
+        guard AppSettings.shared.autoResignEnabled else {
+            task.setTaskCompleted(success: true)
+            return
+        }
         schedule()
         let work = Task { @MainActor in
             await run(interactive: false)
@@ -121,6 +125,7 @@ final class AutoResign: ObservableObject {
         var renewed: [String] = []
         var failed: [String] = []
         for status in expiring {
+            if Task.isCancelled || (!interactive && !AppSettings.shared.autoResignEnabled) { break }
             guard let match = library.first(where: {
                 ProfileMatcher.installed(status.app.bundleID, isBuiltFrom: $0.info.bundleID,
                                          teamID: status.current?.teamIdentifier)
@@ -213,6 +218,8 @@ extension AppSettings {
                     AutoResign.shared.schedule()
                     _ = await AutoResign.requestAuthorization()
                 }
+            } else {
+                BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: AutoResign.taskIdentifier)
             }
         }
     }
@@ -229,3 +236,4 @@ extension AppSettings {
         }
     }
 }
+

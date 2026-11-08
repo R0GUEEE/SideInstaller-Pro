@@ -53,7 +53,11 @@ enum IPACache {
             try FileManager.default.copyItem(at: ipa, to: temporary)
             // Replace atomically, so a crash mid-copy can't leave a half file
             // where a rescuable app used to be.
-            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+            } else {
+                try FileManager.default.moveItem(at: temporary, to: destination)
+            }
             let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path)
             writeName(displayName, for: bundleID)
             Engine.shared.log("Cached \(destination.lastPathComponent) for re-signing.")
@@ -140,3 +144,4 @@ enum IPACache {
         return String(data: data, encoding: .utf8)
     }
 }
+

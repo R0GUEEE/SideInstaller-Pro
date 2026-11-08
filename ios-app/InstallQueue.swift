@@ -40,7 +40,13 @@ final class InstallQueue: ObservableObject {
 
     private var runner: Task<Void, Never>?
 
-    private init() {}
+    private let install: @MainActor (URL) async throws -> Void
+
+    init(install: @escaping @MainActor (URL) async throws -> Void = {
+        try await Engine.shared.installQueuedIPA($0)
+    }) {
+        self.install = install
+    }
 
     var pending: [Item] { items.filter { !$0.isFinished } }
 
@@ -77,50 +83,36 @@ final class InstallQueue: ObservableObject {
 
     func cancel() {
         runner?.cancel()
-        runner = nil
-        isRunning = false
         for index in items.indices where items[index].state == .waiting {
             items[index].state = .failed(L("Cancelled"))
         }
-        // Whatever is mid-install finishes or stops on its own: the engine owns
-        // that run, and cancelling it from here would leave a half-signed app.
-        if Engine.shared.isRunning { Engine.shared.cancelOneClick() }
+        // Keep the queue busy until the engine has reached a safe stopping point.
     }
 
     private func run() async {
-        defer { isRunning = false }
+        defer { isRunning = false; runner = nil }
         while !Task.isCancelled, let next = items.first(where: { $0.state == .waiting }) {
             guard let index = items.firstIndex(where: { $0.id == next.id }) else { break }
             items[index].state = .installing
-            // A queued file (bulk install) goes through the local path; a link
-            // is downloaded first. Both end with `runOneClick` doing the work.
-            if next.url.isFileURL {
-                Engine.shared.installLocalIPA(at: next.url)
-            } else {
-                Engine.shared.installLinkedIPA(next.url)
+            let result: Item.State
+            do {
+                try Task.checkCancellation()
+                try await install(next.url)
+                try Task.checkCancellation()
+                result = .done
+            } catch is CancellationError {
+                result = .failed(L("Cancelled"))
+            } catch {
+                result = .failed(error.localizedDescription)
             }
-            // Wait for the run to end. The engine is the only thing that knows
-            // when signing, pairing work and installation are all finished.
-            var waited = 0.0
-            while Engine.shared.isRunning || Engine.shared.isImportingIPA {
-                if Task.isCancelled { break }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                waited += 1
-                // A run that hangs on a prompt shouldn't stall the line forever.
-                if waited > 900 { break }
+            if let index = items.firstIndex(where: { $0.id == next.id }) {
+                items[index].state = result
             }
-            guard let at = items.firstIndex(where: { $0.id == next.id }) else { break }
-            if let error = Engine.shared.lastError, !error.isEmpty, !Engine.shared.isRunning {
-                items[at].state = .failed(error)
-                Engine.shared.lastError = nil
-            } else {
-                items[at].state = .done
-            }
-            // A pause between installs: Apple's API dislikes bursts, and the
-            // device link needs a moment to settle.
+            if Task.isCancelled { break }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
     }
+
 }
 
 /// What has been installed, and how to get back to it.
@@ -147,7 +139,10 @@ final class InstallHistory: ObservableObject {
 
         var cachedURL: URL? {
             guard let cachedPath else { return nil }
-            let url = URL(fileURLWithPath: cachedPath)
+            // Legacy entries point at the mutable IPACache file. They cannot
+            // identify an old build safely, so only immutable snapshots qualify.
+            guard !cachedPath.contains("/"), cachedPath.hasSuffix(".ipa") else { return nil }
+            let url = InstallHistoryArchive.directory.appendingPathComponent(cachedPath)
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
         }
     }
@@ -170,11 +165,13 @@ final class InstallHistory: ObservableObject {
            Date().timeIntervalSince(last.date) < 60 {
             return
         }
+        let snapshot = cached.flatMap { try? InstallHistoryArchive.store($0) }
         let entry = Entry(id: UUID(), bundleID: bundleID, name: name, version: version,
-                          cachedPath: cached?.path, date: Date(), origin: origin)
+                          cachedPath: snapshot?.lastPathComponent, date: Date(), origin: origin)
         entries.insert(entry, at: 0)
         if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
         save()
+        InstallHistoryArchive.prune(keeping: entries.compactMap(\.cachedPath))
     }
 
     /// The newest earlier build of `bundleID` that's still on disk — what a roll
@@ -188,6 +185,7 @@ final class InstallHistory: ObservableObject {
     func clear() {
         entries.removeAll()
         save()
+        InstallHistoryArchive.prune(keeping: [])
     }
 
     private func save() {
@@ -223,21 +221,52 @@ enum BulkInstallStage {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let destination = directory.appendingPathComponent(url.lastPathComponent)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
+        let batch = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: batch, withIntermediateDirectories: true)
+        let destination = batch.appendingPathComponent(url.lastPathComponent)
+        do {
+            try FileManager.default.copyItem(at: url, to: destination)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: batch)
+            throw error
         }
-        try FileManager.default.copyItem(at: url, to: destination)
-        return destination
     }
 
     /// Deletes the copies for builds no longer in the queue.
     static func prune(keeping urls: [URL]) {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
         else { return }
-        let keep = Set(urls.filter { $0.isFileURL }.map(\.lastPathComponent))
+        let keep = Set(urls.filter { $0.isFileURL }.map { url in
+            url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
+                ? url.lastPathComponent : url.deletingLastPathComponent().lastPathComponent
+        })
         for name in names where !keep.contains(name) {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+}
+
+
+/// Immutable copies: history never points at the mutable latest-build cache.
+enum InstallHistoryArchive {
+    static var directory: URL {
+        IPACache.directory.deletingLastPathComponent()
+            .appendingPathComponent("InstallHistory", isDirectory: true)
+    }
+
+    static func store(_ source: URL) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(UUID().uuidString + ".ipa")
+        try FileManager.default.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    static func prune(keeping names: [String]) {
+        let keep = Set(names)
+        for url in (try? FileManager.default.contentsOfDirectory(at: directory,
+                                        includingPropertiesForKeys: nil)) ?? [] {
+            if !keep.contains(url.lastPathComponent) { try? FileManager.default.removeItem(at: url) }
         }
     }
 }

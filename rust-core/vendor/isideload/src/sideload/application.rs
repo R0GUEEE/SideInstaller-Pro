@@ -189,17 +189,19 @@ impl Application {
         Ok(())
     }
 
-    /// Registers the main app's App ID if the team doesn't have it yet. App
-    /// extensions get none: `sign` signs each one with the main app's profile
-    /// and entitlements, so an App ID of their own would go unused and still
-    /// count against a free Apple ID's 10 a week. Upstream's
-    /// `ExtensionsBehavior::ReuseMain` (fc7a81a, iLoader 2.4.0).
+    /// Register a distinct App ID for the main app and every retained extension.
+    /// Each executable bundle needs a provisioning profile authorizing its identity.
     pub async fn register_app_ids(
         &self,
         dev_session: &mut DeveloperSession,
         team: &DeveloperTeam,
     ) -> Result<Vec<AppId>, Report> {
-        let bundles_with_app_id = [&self.bundle];
+        let nested = self.bundle.collect_nested_bundles();
+        let bundles_with_app_id: Vec<_> = std::iter::once(&self.bundle)
+            .chain(nested.iter().filter(|bundle| {
+                bundle.bundle_dir.extension().and_then(|e| e.to_str()) == Some("appex")
+            }))
+            .collect();
 
         let list_app_ids_response = dev_session
             .list_app_ids(team, None)
@@ -601,3 +603,4 @@ mod tests {
         assert_eq!(test.main_value("ALTDeviceID"), None);
     }
 }
+

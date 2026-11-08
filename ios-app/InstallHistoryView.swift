@@ -67,7 +67,7 @@ struct InstallHistoryView: View {
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
-            Text(L("The list goes; the stored builds stay on disk."))
+            Text(L("The history and its rollback copies are removed. The latest re-signing cache stays on disk."))
         }
         .onAppear(perform: checkDisk)
         .onChange(of: history.entries.count) { _, _ in checkDisk() }
@@ -142,3 +142,4 @@ struct InstallHistoryView: View {
         }
     }
 }
+

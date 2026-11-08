@@ -192,16 +192,16 @@ impl Sideloader {
             .await?;
 
             info!("App IDs configured");
-            Ok::<_, Report>((app, special, group_identifier, main_app_id))
+            Ok::<_, Report>((app, special, group_identifier, main_app_id, app_ids))
         };
 
-        let ((), cert_identity, (mut app, special, group_identifier, main_app_id)) =
+        let ((), cert_identity, (mut app, special, group_identifier, main_app_id, app_ids)) =
             try_join3(registration, certificate, bundle).await?;
 
         // The profile has to come after the device and App IDs are set up; the
         // certificate goes into the bundle meanwhile.
         let dev_session = &mut self.dev_session;
-        let ((), provisioning_profile) = try_join(
+        let ((), profiles) = try_join(
             async {
                 app.apply_special_app_behavior(
                     &special,
@@ -215,11 +215,15 @@ impl Sideloader {
                 Ok::<(), Report>(())
             },
             async {
-                let profile = dev_session
-                    .download_team_provisioning_profile(&team, &main_app_id, None)
-                    .await?;
-                info!("Acquired provisioning profile");
-                Ok::<_, Report>(profile)
+                let mut profiles = std::collections::HashMap::new();
+                for app_id in &app_ids {
+                    let profile = dev_session
+                        .download_team_provisioning_profile(&team, app_id, None)
+                        .await?;
+                    profiles.insert(app_id.identifier.clone(), profile);
+                }
+                info!("Acquired {} provisioning profiles", profiles.len());
+                Ok::<_, Report>(profiles)
             },
         )
         .await?;
@@ -236,10 +240,13 @@ impl Sideloader {
         // as it signs them, since the profile is sealed into CodeResources.
         // Hosts read an extension's copy back: AltStore-family apps reject an
         // extension without one.
+        let provisioning_profile = profiles.get(&main_app_id.identifier)
+            .ok_or_else(|| report!("Missing main app provisioning profile"))?;
         sign::sign(
             &mut app,
             &cert_identity,
-            &provisioning_profile,
+            provisioning_profile,
+            &profiles,
             &special,
             &team,
         )
@@ -342,3 +349,4 @@ impl Sideloader {
         &self.apple_email
     }
 }
+

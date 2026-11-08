@@ -47,8 +47,7 @@ struct Guide: Hashable {
 
 /// What signing a custom IPA costs in App IDs, shown before it's signed.
 struct AppIDCost: Hashable {
-    /// The App IDs signing would register: the app's, if the Apple ID doesn't
-    /// have it yet. Extensions are signed with the app's profile and need none.
+    /// New App IDs for the main app and every retained extension.
     let newIDs: [String]
     /// How many more Apple allows now; nil when it doesn't say.
     let available: Int?
@@ -391,6 +390,8 @@ final class Engine: ObservableObject {
     private var askedLocalNetwork = false
 
     private var pipelineTask: Task<Void, Never>?
+    private var lastInstallSucceeded = false
+    private var queuedInstallActive = false
     /// The IPA download a run starts as soon as the network is up, so it runs
     /// alongside pairing and sign-in instead of after them.
     private var prefetch: (source: InstallSource, channel: ReleaseChannel, version: String?,
@@ -648,24 +649,26 @@ final class Engine: ObservableObject {
     /// `afterProbe` is set on the second pass, once a full-tunnel VPN's probe
     /// has answered.
     @MainActor
-    func runOneClick(afterProbe: Bool = false) {
-        guard !isRunning else { return }
+    @discardableResult
+    func runOneClick(afterProbe: Bool = false, fromQueue: Bool = false) -> Task<Void, Never>? {
+        guard !queuedInstallActive || fromQueue else { return nil }
+        guard !isRunning else { return nil }
         // Nothing downstream works on an older iOS.
         guard osSupported else {
             log("⛔️ iOS \(osVersionText) isn't supported — SideInstaller needs iOS \(Engine.minimumTunnelOSText) or later.")
-            return
+            return nil
         }
         // Below iOS 27 this iPhone can't pair with itself, so the run needs a
         // pairing file made elsewhere and imported.
         guard canSelfPair || hasPairingFile else {
             setGuide(Guides.importPairing)
             log("⛔️ iOS \(osVersionText) can't create its own pairing file. Import one under “Pairing file”, then tap Install again.")
-            return
+            return nil
         }
         guard !normalizedAppleID.isEmpty, !applePassword.isEmpty else {
             setGuide(Guides.account)
             log("⛔️ No Apple ID saved. Add one in Settings › Account, then tap Install again.")
-            return
+            return nil
         }
         // Installing a build this iOS can't run would only use up an App ID.
         if let needed = installSource.minimumOSMajorVersion,
@@ -674,13 +677,13 @@ final class Engine: ObservableObject {
             lastError = ErrorHelp.explained(L("%@ needs iOS %d or later. This iPhone runs iOS %@.",
                                               installSource.displayName, needed, osVersionText))
             log("⛔️ \(installSource.displayName) needs iOS \(needed) or later; this iPhone runs iOS \(osVersionText).")
-            return
+            return nil
         }
         // A custom install needs its IPA before anything else runs.
         if installSource == .custom, IPALibrary.customImport() == nil {
             setGuide(Guides.customIPA)
             log("⛔️ No IPA imported yet. Tap “Import .ipa” and pick one, then tap Install again.")
-            return
+            return nil
         }
         // The install runs over the loopback tunnel, so require it up front,
         // unless the run can start LocalDevVPN itself (see `ensureNetwork`).
@@ -688,7 +691,7 @@ final class Engine: ObservableObject {
         guard !needsFreshPairing || wifiConnected else {
             setGuide(Guides.wifi)
             log("⛔️ Wi-Fi is off, and pairing this iPhone needs it. Connect to a Wi-Fi network, then tap Install again.")
-            return
+            return nil
         }
         guard tunnelAvailable else {
             // A full-tunnel VPN counts as down until its probe answers, which
@@ -698,17 +701,18 @@ final class Engine: ObservableObject {
                     await self.settleNetworkStatus()
                     self.runOneClick(afterProbe: true)
                 }
-                return
+                return nil
             }
             setGuide(Guides.vpn)
             log("⛔️ No loopback VPN is connected. Turn one on, then tap Install again.")
-            return
+            return nil
         }
         // A tunnel pointed at this iPhone's own address can never connect.
         guard deviceIPIsUsable() else {
             setGuide(Guides.deviceIPMismatch)
-            return
+            return nil
         }
+        lastInstallSucceeded = false
         resetRun()
         isRunning = true
         log("=== Starting one-click install ===")
@@ -753,6 +757,7 @@ final class Engine: ObservableObject {
                 cacheInstalledIPA()
                 try await writePairing(accountConfig: accountConfig, prepared: prepared)
                 finishSuccess()
+                lastInstallSucceeded = true
                 Haptics.success()
                 outcome = .installed
             } catch is CancellationError {
@@ -781,6 +786,7 @@ final class Engine: ObservableObject {
             pairingPIN = nil
             InstallActivity.shared.runEnded(outcome)
         }
+        return pipelineTask
     }
 
     /// Stop the pipeline at the next safe point.
@@ -1948,7 +1954,11 @@ final class Engine: ObservableObject {
         setStep(.sign, .active)
         let cost: AppIDCost
         do {
-            cost = try await onSignQueue { try self.performAppIDQuota(session: session, bundleID: bundleID) }
+            cost = try await onSignQueue {
+                let extensions = IPAExtensions.read(URL(fileURLWithPath: ipa)).map(\.bundleID)
+                return try self.performAppIDQuota(session: session, bundleID: bundleID,
+                                                  extensionIDs: extensions)
+            }
         } catch {
             log("⚠️ Couldn't check this Apple ID's App IDs (\(short(error))); signing goes ahead.")
             return
@@ -1984,7 +1994,7 @@ final class Engine: ObservableObject {
         }
     }
 
-    private func performAppIDQuota(session: OpaquePointer, bundleID: String) throws -> AppIDCost {
+    private func performAppIDQuota(session: OpaquePointer, bundleID: String, extensionIDs: [String]) throws -> AppIDCost {
         struct Quota: Decodable {
             let new_ids: [String]
             let available: Int?
@@ -1993,7 +2003,9 @@ final class Engine: ObservableObject {
         }
         var json: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        let rc = si_appid_quota(session, bundleID, &json, &error)
+        let ids = try JSONEncoder().encode([bundleID] + extensionIDs)
+        let payload = String(decoding: ids, as: UTF8.self)
+        let rc = si_appid_quota(session, payload, &json, &error)
         guard rc == 0 else {
             let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
             error.map { si_string_free($0) }
@@ -2127,8 +2139,15 @@ final class Engine: ObservableObject {
         guard let ipa = downloadedIPAPath else { return }
         let url = URL(fileURLWithPath: ipa)
         guard let info = IPALibrary.appInfo(at: url) else { return }
-        let cached = IPACache.store(url, bundleID: info.bundleID,
+        IPACache.store(url, bundleID: info.bundleID,
                                     displayName: signedDisplayName ?? info.name)
+        // The history is what makes "roll back to the last build" possible, and
+        // it's written from the same facts the cache just used.
+        InstallHistory.shared.record(bundleID: info.bundleID,
+                                     name: signedDisplayName ?? info.name,
+                                     version: info.version,
+                                     cached: url,
+                                     origin: installSource.displayName)
         IPACache.prune()
         // One build per app on disk: an older download of the same app is of no
         // use once this one is installed, and it is what fills the phone up.
@@ -2136,13 +2155,7 @@ final class Engine: ObservableObject {
         if cleaned.removed > 0 {
             log("Downloads: kept only the newest build of each app — removed \(cleaned.removed) older file(s), \(ByteCountFormatter.string(fromByteCount: Int64(cleaned.freed), countStyle: .file)) back.")
         }
-        // The history is what makes "roll back to the last build" possible, and
-        // it's written from the same facts the cache just used.
-        InstallHistory.shared.record(bundleID: info.bundleID,
-                                     name: signedDisplayName ?? info.name,
-                                     version: info.version,
-                                     cached: cached?.url,
-                                     origin: installSource.displayName)
+
     }
 
     /// Model, iOS build and UDID as lockdown reports them, for the Device page.
@@ -3212,7 +3225,7 @@ final class Engine: ObservableObject {
     /// and the update banner.
     @MainActor
     func installLinkedIPA(_ url: URL) {
-        guard !isRunning, !isImportingIPA else { return }
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
         lastError = nil
         installSource = .custom
         Task { @MainActor in
@@ -3255,7 +3268,7 @@ final class Engine: ObservableObject {
     /// its copy on disk), the release picked, the build and channel, and the
     /// last run's state. The next install starts from a clean menu.
     func resetInstallMenu() {
-        guard !isRunning, !isImportingIPA else { return }
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
         if let imported = IPALibrary.customImport()?.url {
             try? FileManager.default.removeItem(at: imported)
         }
@@ -3285,15 +3298,53 @@ final class Engine: ObservableObject {
     /// it: the marketplace hands off here so an app can be configured — name,
     /// capabilities, tweaks — before it's signed.
     func prepareLinkedIPA(_ url: URL) {
-        guard !isRunning, !isImportingIPA else { return }
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
         lastError = nil
         Task { @MainActor in
             _ = await self.importCustomIPA(fromLink: url.absoluteString)
         }
     }
 
+    /// Queue completion means the pipeline finished, not merely that a task was scheduled.
+    @MainActor
+    func installQueuedIPA(_ url: URL) async throws {
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else {
+            throw EngineError.message(L("An installation is already running."))
+        }
+        queuedInstallActive = true
+        defer { queuedInstallActive = false }
+        try Task.checkCancellation()
+        lastError = nil
+        installSource = .custom
+        if url.isFileURL {
+            await importCustomIPA(from: url)
+        } else if !(await importCustomIPA(fromLink: url.absoluteString)) {
+            throw EngineError.message(lastError ?? L("Couldn't import the IPA."))
+        }
+        try Task.checkCancellation()
+        if let error = lastError { throw EngineError.message(error) }
+        if let report = await Self.inspectCustomImport(),
+           let blocker = report.issues.first(where: { $0.severity == .blocker }) {
+            throw EngineError.message(L("%@: %@", blocker.title, blocker.detail))
+        }
+        await settleNetworkStatus()
+        try Task.checkCancellation()
+        guard let task = runOneClick(afterProbe: true, fromQueue: true) else {
+            throw EngineError.message(lastError ?? guide?.title ?? L("Installation could not start."))
+        }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+            Task { @MainActor in self.cancelOneClick() }
+        }
+        try Task.checkCancellation()
+        if let error = lastError { throw EngineError.message(error) }
+        guard lastInstallSucceeded else { throw CancellationError() }
+    }
+
     func installLocalIPA(at url: URL, then run: Bool = true) {
-        guard !isRunning, !isImportingIPA else { return }
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
         lastError = nil
         installSource = .custom
         Task { @MainActor in
@@ -4668,3 +4719,4 @@ enum TwoFactorPhase: Equatable {
         }
     }
 }
+
