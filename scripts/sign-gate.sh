@@ -145,7 +145,7 @@ PROFILE_ARGS=("$WIDGET_ID=$WORK/widget.mobileprovision" "$SHARE_ID=$WORK/share.m
   "$WORK/app.mobileprovision" "${PROFILE_ARGS[@]}" ) | tee "$WORK/report.txt"
 
 # `awk -F=` so the keys' `[` `]` are never read as a regex.
-value() { awk -v k="$1" -F= '$1 == k { sub($1 "=", ""); print; exit }' "$WORK/report.txt"; }
+value() { awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$WORK/report.txt"; }
 
 # --- assertions --------------------------------------------------------------
 echo "==> the report the signer wrote"
