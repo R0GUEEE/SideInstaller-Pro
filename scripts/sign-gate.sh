@@ -195,11 +195,24 @@ keys=$(plutil -convert json -o - "$WORK/lib.ent.plist" 2>/dev/null | tr -d '{} '
 ok "$(basename "$LIB") signed with an empty entitlement set"
 
 echo "==> the profiles are sealed into CodeResources"
-plutil -p "$APP/_CodeSignature/CodeResources" | sed -n '1,30p'
-plutil -extract 'files.embedded.mobileprovision' raw "$APP/_CodeSignature/CodeResources" >/dev/null ||
+# The profile has to be inside the envelope before the bundle is signed: that
+# is what stops it being added to an already-signed app later, and what makes
+# SideStore's extension check pass. `plutil -extract` wants the dictionary as
+# its target, so the key is pulled out of the JSON conversion instead.
+sealed() {
+  plutil -convert json -o - "$1" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+files = data.get("files", {})
+sys.exit(0 if "embedded.mobileprovision" in files else 1)
+'
+}
+sealed "$APP/_CodeSignature/CodeResources" ||
   fail "embedded.mobileprovision is not sealed in the app's CodeResources"
-plutil -extract 'files.embedded.mobileprovision' raw "$APP/PlugIns/Widget.appex/_CodeSignature/CodeResources" >/dev/null ||
+sealed "$APP/PlugIns/Widget.appex/_CodeSignature/CodeResources" ||
   fail "the widget's embedded.mobileprovision is not sealed in its CodeResources"
+sealed "$APP/PlugIns/Share.appex/_CodeSignature/CodeResources" ||
+  fail "Share.appex's embedded.mobileprovision is not sealed in its CodeResources"
 ok "CodeResources lists the profiles"
 
 echo "SIGN GATE PASSED"
