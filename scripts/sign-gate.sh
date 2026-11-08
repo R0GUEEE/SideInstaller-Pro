@@ -200,17 +200,14 @@ echo "==> the profiles are sealed into CodeResources"
 # SideStore's extension check pass. `plutil -extract` wants the dictionary as
 # its target, so the key is pulled out of the JSON conversion instead.
 sealed() {
-  plutil -convert json -o - "$1" 2>&1 | python3 -c '
-import json, sys
-raw = sys.stdin.read()
-try:
-    files = json.loads(raw).get("files", {})
-except Exception as e:
-    print("  unreadable CodeResources:", raw[:200], file=sys.stderr)
-    sys.exit(1)
+  python3 - "$1" <<'PY'
+# plutil refuses a plist with <data> as JSON; Python reads it as it is.
+import plistlib, sys
+with open(sys.argv[1], "rb") as handle:
+    files = plistlib.load(handle).get("files", {})
 print("  sealed files:", ", ".join(sorted(files)) or "(none)", file=sys.stderr)
 sys.exit(0 if "embedded.mobileprovision" in files else 1)
-'
+PY
 }
 sealed "$APP/_CodeSignature/CodeResources" ||
   fail "embedded.mobileprovision is not sealed in the app's CodeResources"
