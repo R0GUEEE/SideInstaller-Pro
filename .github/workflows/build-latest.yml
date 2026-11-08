@@ -33,7 +33,7 @@ jobs:
           done
       - name: Exercise installation queue and storage
         run: |
-          xcrun swiftc -parse-as-library ios-app/IPACache.swift ios-app/InstallQueue.swift tools/install-regression/main.swift -o "$RUNNER_TEMP/install-regression"
+          xcrun swiftc -parse-as-library ios-app/IPACache.swift ios-app/InstallQueue.swift ios-app/DownloadsManager.swift tools/install-regression/main.swift -o "$RUNNER_TEMP/install-regression"
           "$RUNNER_TEMP/install-regression"
 
   build:

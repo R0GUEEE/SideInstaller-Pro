@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// One IPA in Documents, as the download manager in Settings lists it.
 struct DownloadedIPA: Identifiable, Equatable {
@@ -88,6 +89,9 @@ final class DownloadsManager: ObservableObject {
         // Everything installable, grouped by the app it carries.
         var groups: [String: [(url: URL, version: String?, date: Date, size: Int)]] = [:]
         for entry in IPALibrary.scan() {
+            // The re-signing cache is owned by IPACache, not download cleanup.
+            // A newer download is not evidence that it was successfully installed.
+            guard entry.url.deletingLastPathComponent().standardizedFileURL != IPACache.directory.standardizedFileURL else { continue }
             guard let info = IPALibrary.appInfo(at: entry.url) else { continue }
             groups[info.bundleID, default: []].append(
                 (entry.url, info.version, entry.modified ?? .distantPast, entry.size))
@@ -105,7 +109,7 @@ final class DownloadsManager: ObservableObject {
                     return lhs.date > rhs.date
                 }
             }
-            guard let keep = sorted.first else { continue }
+            guard !sorted.isEmpty else { continue }
             for file in sorted.dropFirst() {
                 guard !protected.contains(file.url.path) else { continue }
                 // Never delete a cache entry the app depends on for re-signing
@@ -148,3 +152,4 @@ final class DownloadsManager: ObservableObject {
         refresh()
     }
 }
+

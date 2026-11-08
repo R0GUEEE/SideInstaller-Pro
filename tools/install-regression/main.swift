@@ -3,11 +3,36 @@ import Combine
 
 // Only the device-facing boundary is substituted; queue, cache, staging and
 // history below are the production implementations.
-func L(_ text: String) -> String { text }
+func L(_ text: String, _ args: CVarArg...) -> String { String(format: text, arguments: args) }
 final class Engine {
     static let shared = Engine()
+    var downloadedIPAPath: String?
+    func refreshCustomIPA() {}
     func log(_ text: String) { print(text) }
     @MainActor func installQueuedIPA(_ url: URL) async throws { fatalError("Inject a test installer") }
+}
+
+enum InstallSource: Equatable { case custom; var displayName: String { "Custom" } }
+enum ReleaseChannel: Equatable { case stable, nightly; var displayName: String { "Stable" } }
+enum DownloadLedger { static func forget(_ url: URL) {} }
+enum IPALibrary {
+    struct Entry {
+        let url: URL
+        let version: String?
+        var source: InstallSource { .custom }
+        var channel: ReleaseChannel { .stable }
+        var size: Int { 1 }
+        var modified: Date? { .distantPast }
+        var isImported: Bool { true }
+    }
+    struct AppInfo { let bundleID: String; let version: String? }
+    static var entries: [Entry] = []
+    static var bundleID = ""
+    static func scan() -> [Entry] { entries }
+    static func customImport() -> Entry? { nil }
+    static func appInfo(at url: URL) -> AppInfo? {
+        entries.first { $0.url == url }.map { AppInfo(bundleID: bundleID, version: $0.version) }
+    }
 }
 
 enum TestError: Error { case installFailed }
@@ -82,6 +107,20 @@ enum TestError: Error { case installFailed }
         assert(fm.fileExists(atPath: stagedB.path))
         BulkInstallStage.prune(keeping: [])
 
+        let obsolete = work.appendingPathComponent("obsolete.ipa")
+        let newer = work.appendingPathComponent("newer.ipa")
+        try Data("old download".utf8).write(to: obsolete)
+        try Data("new download".utf8).write(to: newer)
+        IPALibrary.bundleID = id
+        IPALibrary.entries = [.init(url: obsolete, version: "1"),
+                              .init(url: cache.url, version: "2"),
+                              .init(url: newer, version: "3")]
+        let cleanup = DownloadsManager.keepNewestOnly()
+        assert(cleanup.removed == 1)
+        assert(!fm.fileExists(atPath: obsolete.path))
+        assert(fm.fileExists(atPath: newer.path))
+        assert(fm.fileExists(atPath: cache.url.path), "Cleanup removed the re-signing cache")
+
         let gate = Gate()
         var calls = 0
         let queue = InstallQueue { _ in
@@ -115,6 +154,6 @@ enum TestError: Error { case installFailed }
         for item in cancelled.items {
             if case .failed = item.state {} else { fatalError("Cancelled install marked successful") }
         }
-        print("PASS: first cache, replacement, immutable rollback, staging collisions, queue completion and cancellation")
+        print("PASS: first cache, replacement, immutable rollback, staging collisions, cache-safe cleanup, queue completion and cancellation")
     }
 }
