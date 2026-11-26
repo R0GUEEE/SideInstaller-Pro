@@ -706,8 +706,8 @@ final class SideBySideManager: ObservableObject {
         var summary: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
         // 0 = don't save the session: it's someone else's Apple ID.
-        let rc = si_apple_signin(id, pw, anisette, "SideInstaller", dir, 0,
-                                 sideBySideTwoFactorCallback, nil,
+        let rc = si_apple_signin(id, pw, anisette, "SideInstaller", dir, 0, nil,
+                                 sideBySideTwoFactorCallback, nil, nil,
                                  &session, &summary, &error)
         if rc == 0 {
             if let old = signSession { si_sign_session_free(old) }
