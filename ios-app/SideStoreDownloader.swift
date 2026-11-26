@@ -2349,6 +2349,7 @@ extension IPALibrary {
             if ended { return written }
         }
         return nil          // the zip ended before the stream did
+    }
     /// The first `limit` bytes of a member, without inflating all of it.
     ///
     /// A Mach-O's load commands — including the name of every library it
