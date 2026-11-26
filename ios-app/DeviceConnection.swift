@@ -2816,3 +2816,5 @@ extension DeviceConnection {
         }
         return (0..<count).compactMap { entries[$0].map { String(cString: $0) } }
             .filter { $0 != "." && $0 != ".." }
+    }
+}
