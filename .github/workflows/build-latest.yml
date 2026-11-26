@@ -78,7 +78,11 @@ jobs:
             cargo-ios-
       - name: Test App ID accounting
         working-directory: rust-core
-        run: cargo test --locked --lib account::app_id_quota_tests
+        # Let cargo resolve the lock here: the Pro fork keeps isideload's
+        # `install` feature on (its vendored copy uses idevice unconditionally),
+        # which pulls a second idevice from crates.io that the upstream lock
+        # doesn't carry. The IPA build below is not --locked either.
+        run: cargo test --lib account::app_id_quota_tests
       - name: Build unsigned IPA
         env:
           OUTPUT: ${{ runner.temp }}/ipa/SideInstaller.ipa
