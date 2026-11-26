@@ -72,6 +72,7 @@ idevice-ffi = { path = "vendor/idevice-ffi", default-features = false, features 
 # vendored copy gates its idevice uses behind it — vendor/isideload/README.md,
 # change 15). `fs-storage` avoids keyring.
 isideload = { git = "https://github.com/nab138/isideload.git", package = "isideload", default-features = false, features = [
+  "install",
   "fs-storage",
 ] }
 
