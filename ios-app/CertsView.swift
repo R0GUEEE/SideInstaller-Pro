@@ -10,16 +10,16 @@ struct CertsView: View {
 
     /// The certificate the user tapped "Revoke" on, pending confirmation.
     @State private var pendingRevoke: DevCert?
-    /// The certificate the user tapped "Export" on, pending a password (or none).
+    /// The certificate the user tapped "Export" on, pending a password.
     @State private var pendingExport: DevCert?
     @State private var exportPassword = ""
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 18) {
                 header.cascadeItem(0)
                 loadButton.cascadeItem(1)
-                if manager.canUseSideStoreCertificate {
+                if manager.sideStoreInstalled {
                     sideStoreCard.cascadeItem(2)
                 }
                 // Errors show as a popup, which `RootView` lays over the app.
@@ -29,16 +29,17 @@ struct CertsView: View {
             .alert(L("Export certificate"),
                    isPresented: Binding(get: { pendingExport != nil },
                                         set: { if !$0 { endExport() } })) {
-                SecureField(L("Password (optional)"), text: $exportPassword)
+                SecureField(L("Password"), text: $exportPassword)
                 Button(L("Export")) {
                     if let cert = pendingExport {
                         manager.export(cert, password: exportPassword, share: share)
                     }
                     endExport()
                 }
+                .disabled(exportPassword.isEmpty)
                 Button(L("Cancel"), role: .cancel) { endExport() }
             } message: {
-                Text(L("Saves this certificate and its private key as a .p12 file, for another signing app or a computer to sign with. Choose a password, which you'll need to import the file, or leave it empty: signing apps import it without one, but a Mac won't. Keep the file to yourself."))
+                Text(L("Saves this certificate and its private key as a .p12 file, for another signing app or a computer to sign with. Choose a password for it: you'll need it to import the file. Keep the file to yourself."))
             }
             .padding(20)
             .pageColumn()
@@ -68,10 +69,10 @@ struct CertsView: View {
     // MARK: Header
 
     private var header: some View {
-        BrandHeader(icon: "checkmark.seal", image: "CertsLogo", title: L("Certificates")) {
+        BrandHeader(icon: "checkmark.seal.fill", image: "CertsLogo", title: L("Certificates")) {
             if let team = manager.teamSummary {
-                StatusDot(text: team, color: Theme.positive)
-                    .transition(.opacity)
+                StatusPill(text: team, systemImage: "person.2.fill", color: .green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
             }
         }
     }
@@ -82,12 +83,12 @@ struct CertsView: View {
         Button {
             manager.loadCerts()
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if manager.isWorking {
-                    ProgressView()
+                    ProgressView().tint(.white)
                     Text(manager.isSignedIn ? L("Refreshing") : L("Signing in"))
                 } else {
-                    Image(systemName: manager.hasLoaded ? "arrow.clockwise" : "list.bullet.rectangle")
+                    Image(systemName: manager.hasLoaded ? "arrow.clockwise" : "list.bullet.rectangle.fill")
                         .contentTransition(.symbolEffect(.replace))
                     Text(manager.hasLoaded ? L("Refresh") : L("Load certificates"))
                 }
@@ -100,21 +101,18 @@ struct CertsView: View {
     // MARK: SideStore's certificate
 
     /// Signs with SideStore's certificate instead of a certificate of its own,
-    /// which a free Apple ID can't have alongside SideStore's. Inside
-    /// LiveContainer it's read from LiveContainer, as SideStore can't send it.
+    /// which a free Apple ID can't have alongside SideStore's.
     private var sideStoreCard: some View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
-                Text(Engine.runsInLiveContainer
-                     ? L("SideInstaller takes SideStore's certificate from LiveContainer and signs with it too, so on a free Apple ID neither app has to revoke the other's.")
-                     : L("SideStore opens and sends back its certificate. SideInstaller then signs with it too, so on a free Apple ID neither app has to revoke the other's."))
+                Text(L("SideStore opens and sends back its certificate. SideInstaller then signs with it too, so on a free Apple ID neither app has to revoke the other's."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
                     manager.requestSideStoreCertificate(retryInstall: false)
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         if manager.isImporting {
                             ProgressView().controlSize(.small)
                             Text(L("Checking the certificate"))
@@ -123,10 +121,11 @@ struct CertsView: View {
                             Text(L("Use SideStore's certificate"))
                         }
                     }
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                .buttonStyle(.bordered)
+                .tint(Theme.accent)
                 .disabled(manager.isBusy)
             }
         }
@@ -139,11 +138,11 @@ struct CertsView: View {
         if manager.hasLoaded && manager.certs.isEmpty && !manager.isWorking {
             emptyState.transition(.cardAppear)
         } else if !manager.certs.isEmpty {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 HStack {
                     // Count only; Apple doesn't report the account's limit.
                     Text(L("%d certificate(s)", manager.certs.count))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -168,7 +167,7 @@ struct CertsView: View {
             VStack(spacing: 8) {
                 Image(systemName: "checkmark.seal")
                     .font(.largeTitle)
-                    .foregroundStyle(Theme.muted)
+                    .foregroundStyle(Theme.brand)
                 Text(L("No certificates"))
                     .font(.headline)
                 Text(L("This Apple ID has no development certificates to revoke."))
@@ -185,28 +184,31 @@ struct CertsView: View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "seal")
+                    Image(systemName: "seal.fill")
                         .font(.title3)
-                        .foregroundStyle(cert.isExpired ? Theme.warning : Theme.muted)
-                    VStack(alignment: .leading, spacing: 4) {
+                        .foregroundStyle(cert.isExpired ? Theme.gradient(.orange) : Theme.brand)
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(cert.displayName)
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                         if let machine = cert.machineLabel {
                             Label(machine, systemImage: "desktopcomputer")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         if cert.isSigning {
-                            Label(L("SideInstaller signs with this one"), systemImage: "checkmark.seal")
+                            Label(L("SideInstaller signs with this one"), systemImage: "checkmark.seal.fill")
                                 .font(.caption.weight(.medium))
-                                .foregroundStyle(Theme.positive)
+                                .foregroundStyle(.green)
                         }
                     }
                     Spacer()
                     if cert.isExpired {
                         Text(L("Expired"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Theme.warning)
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.orange.opacity(0.16)))
                     }
                 }
 
@@ -228,8 +230,7 @@ struct CertsView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                HStack(spacing: 8) {
-                    // Only this one's private key is on the iPhone (see `DevCert.isSigning`).
+                HStack(spacing: 10) {
                     if cert.isSigning {
                         exportButton(cert)
                     }
@@ -244,7 +245,7 @@ struct CertsView: View {
             exportPassword = ""
             pendingExport = cert
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if manager.exportingID == cert.id {
                     ProgressView().controlSize(.small)
                     Text(L("Exporting"))
@@ -259,7 +260,8 @@ struct CertsView: View {
             .minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity)
         }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+        .buttonStyle(.bordered)
+        .tint(Theme.accent)
         .controlSize(.regular)
         .disabled(manager.isBusy)
     }
@@ -268,7 +270,7 @@ struct CertsView: View {
         Button(role: .destructive) {
             pendingRevoke = cert
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if manager.revokingID == cert.id {
                     ProgressView().controlSize(.small)
                     Text(L("Revoking"))
@@ -283,7 +285,8 @@ struct CertsView: View {
             .minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity)
         }
-        .buttonStyle(SecondaryButtonStyle(tint: Theme.negative), sound: .tap)
+        .buttonStyle(.bordered)
+        .tint(.red)
         .controlSize(.regular)
         .disabled(manager.isBusy)
     }

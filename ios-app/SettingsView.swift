@@ -4,7 +4,7 @@ import UIKit
 /// The settings sheet: occasional configuration and the activity log, kept out
 /// of the main flow.
 struct SettingsView: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Observed for the language picker, and to redraw on language change.
     @EnvironmentObject private var loc: Localizer
     /// The saved Apple IDs the Account section manages.
@@ -17,9 +17,6 @@ struct SettingsView: View {
     @State private var pendingDelete: DownloadedIPA?
     /// The Apple ID the user swiped to remove, pending confirmation.
     @State private var pendingRemove: SavedAccount?
-    /// The Apple ID whose team the user swiped to pick again, pending
-    /// confirmation.
-    @State private var pendingTeamReset: SavedAccount?
     /// Set while the add/edit sheet is up, and for which account.
     @State private var editorTarget: AccountEditorTarget?
 
@@ -64,7 +61,6 @@ struct SettingsView: View {
             Form {
                 accountSection
                 languageSection
-                soundsSection
                 tunnelSection
                 developerModeSection
                 downloadsSection
@@ -139,14 +135,14 @@ struct SettingsView: View {
 
     // MARK: Account
 
-    /// Saved Apple IDs: tap to make one active, swipe to edit or remove one or
-    /// pick its team again, or add a new one.
+    /// Saved Apple IDs: tap to make one active, swipe to edit or remove, or add
+    /// a new one.
     private var accountSection: some View {
         Section {
             ForEach(accounts.accounts) { account in
                 Button { accounts.activate(account) } label: { accountRow(account) }
                     // `.plain` keeps the row text from using the accent color.
-                    .buttonStyle(.plain, sound: .tick)
+                    .buttonStyle(.plain)
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
                             pendingRemove = account
@@ -155,23 +151,13 @@ struct SettingsView: View {
                         }
                         // Set explicitly: the row's `.plain` style removes the
                         // destructive red.
-                        .tint(Theme.negative)
+                        .tint(.red)
                         Button {
                             editorTarget = .existing(account)
                         } label: {
                             Label(L("Edit"), systemImage: "pencil")
                         }
                         .tint(Theme.accent)
-                        // Only once a team was picked, which an Apple ID on
-                        // more than one is asked for.
-                        if accounts.team(for: account.normalized) != nil {
-                            Button {
-                                pendingTeamReset = account
-                            } label: {
-                                Label(L("Team"), systemImage: "person.2")
-                            }
-                            .tint(Theme.warning)
-                        }
                     }
             }
             if accounts.accounts.isEmpty {
@@ -180,43 +166,28 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Button { editorTarget = .new } label: {
-                Label(L("Add Apple ID"), systemImage: "plus.circle")
+                Label(L("Add Apple ID"), systemImage: "plus.circle.fill")
             }
             if let warning = accounts.keychainWarning {
-                Label(warning, systemImage: "exclamationmark.triangle")
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Theme.warning)
+                    .foregroundStyle(.orange)
             }
         } header: {
             Text(L("Account"))
         }
-        // On the section, apart from the Form's alerts, so they don't conflict.
-        .alert(L("Pick the team again?"),
-               isPresented: Binding(get: { pendingTeamReset != nil },
-                                    set: { if !$0 { pendingTeamReset = nil } })) {
-            Button(L("Pick Again")) {
-                if let account = pendingTeamReset { accounts.forgetTeam(for: account.normalized) }
-                pendingTeamReset = nil
-            }
-            Button(L("Cancel"), role: .cancel) { pendingTeamReset = nil }
-        } message: {
-            if let account = pendingTeamReset {
-                Text(L("The next sign-in with “%@” asks which developer team signs.", account.appleID))
-            }
-        }
     }
 
-    /// One saved Apple ID, ticked when it is the one in use, with the
-    /// developer team it signs with when one was picked.
+    /// One saved Apple ID, ticked when it is the one in use.
     private func accountRow(_ account: SavedAccount) -> some View {
         let isActive = accounts.isActive(account)
         return HStack(spacing: 12) {
-            Image(systemName: "person.crop.circle")
+            Image(systemName: "person.crop.circle.fill")
                 .font(.title3)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isActive ? AnyShapeStyle(Theme.brand) : AnyShapeStyle(.secondary))
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.appleID)
-                    .font(.subheadline.weight(isActive ? .medium : .regular))
+                    .font(.subheadline.weight(isActive ? .semibold : .regular))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if isActive {
@@ -224,19 +195,12 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if let team = accounts.team(for: account.normalized) {
-                    Text(team.label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
             }
             Spacer(minLength: 8)
             if isActive {
                 Image(systemName: "checkmark")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.accent)
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Theme.accent2)
             }
         }
         .foregroundStyle(.primary)
@@ -258,16 +222,6 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Sounds
-
-    private var soundsSection: some View {
-        Section {
-            Toggle(L("Sound effects"), isOn: $soundEffects)
-        } header: {
-            Text(L("Sounds"))
-        }
-    }
-
     // MARK: Tunnel
 
     /// LocalDevVPN controls: start it whenever something needs the tunnel, or
@@ -276,7 +230,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var tunnelSection: some View {
         Section {
-            Toggle(L("Start LocalDevVPN when needed"), isOn: Bindable(engine).autoStartVPN)
+            Toggle(L("Start LocalDevVPN when needed"), isOn: $engine.autoStartVPN)
             Button {
                 Task {
                     let opened = await engine.startLocalDevVPN()
@@ -323,10 +277,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let note = developerModeNote {
-                Label(note.text, systemImage: note.failed ? "exclamationmark.triangle"
-                                                          : "checkmark.circle")
+                Label(note.text, systemImage: note.failed ? "exclamationmark.triangle.fill"
+                                                          : "checkmark.circle.fill")
                     .font(.caption)
-                    .foregroundStyle(note.failed ? AnyShapeStyle(Theme.negative) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(note.failed ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
             }
         } header: {
             Text(L("Developer Mode"))
@@ -356,12 +310,10 @@ struct SettingsView: View {
                     text = L("Developer Mode is set to turn on, and this iPhone restarts now. Once you unlock it, tap Turn On.")
                 }
                 developerModeNote = DeveloperModeNote(text: text, failed: false)
-                SoundEffects.play(.success)
             } catch {
                 developerModeNote = DeveloperModeNote(
                     text: (error as? LocalizedError)?.errorDescription ?? String(describing: error),
                     failed: true)
-                SoundEffects.play(.error)
             }
             developerModeBusy = false
         }
@@ -373,9 +325,9 @@ struct SettingsView: View {
     private var downloadsSection: some View {
         Section {
             if let error = downloadsManager.lastError {
-                Label(error, systemImage: "exclamationmark.triangle")
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(Theme.negative)
+                    .foregroundStyle(.red)
             }
             if downloadsManager.hasLoaded && downloadsManager.downloads.isEmpty {
                 Text(L("No downloaded IPAs. Ones you install from the Install tab are cached here."))
@@ -405,9 +357,9 @@ struct SettingsView: View {
 
     private func downloadRow(_ item: DownloadedIPA) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "shippingbox")
+            Image(systemName: "shippingbox.fill")
                 .font(.title3)
-                .foregroundStyle(Theme.muted)
+                .foregroundStyle(Theme.brand)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.displayName)
                     .font(.subheadline.weight(.medium))
@@ -423,8 +375,11 @@ struct SettingsView: View {
             }
             Spacer()
             Text(item.sizeText)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(Theme.muted)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(Theme.accent2)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Theme.accent.opacity(0.16)))
         }
     }
 
@@ -448,7 +403,7 @@ struct SettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             } else if anisetteIsCustom {
-                TextField(L("Server URL"), text: Bindable(engine).anisetteURL)
+                TextField(L("Server URL"), text: $engine.anisetteURL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -542,7 +497,7 @@ struct SettingsView: View {
             HStack {
                 Text(L("Device IP"))
                 Spacer()
-                TextField("10.7.0.1", text: Bindable(engine).deviceIP)
+                TextField("10.7.0.1", text: $engine.deviceIP)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.numbersAndPunctuation)
@@ -556,20 +511,35 @@ struct SettingsView: View {
 
     // MARK: Activity log
 
-    // The lines are read only in `LogConsole` and `LogHeader`, so a new one
-    // redraws those two and not the rest of Settings.
     private var logSection: some View {
         Section {
-            LogConsole()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(engine.lines) { line in
+                            Text("\(line.stamp)  \(line.text)")
+                                .font(.system(.caption2, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(line.id)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(height: 240)
+                .onChange(of: engine.lines.count) { _, _ in
+                    if let last = engine.lines.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
             HStack {
                 Button {
-                    UIPasteboard.general.string = LogStore.shared.text
+                    UIPasteboard.general.string = engine.logText()
                 } label: {
                     Label(L("Copy"), systemImage: "doc.on.doc")
                 }
                 Spacer()
                 Button(role: .destructive) {
-                    LogStore.shared.clear()
+                    engine.clearLog()
                 } label: {
                     Label(L("Clear"), systemImage: "trash")
                 }
@@ -579,48 +549,8 @@ struct SettingsView: View {
                 Label(L("Report a problem"), systemImage: "exclamationmark.bubble")
             }
             .font(.subheadline)
-            Toggle(L("Verbose logging"), isOn: Bindable(engine).verboseLogging)
         } header: {
-            LogHeader()
-        } footer: {
-            Text(L("Adds the messages exchanged with iOS to the log, for tracking down a connection problem. Leave it off otherwise, as they quickly fill the log."))
+            Text(L("Activity Log (%d)", engine.lines.count))
         }
-    }
-}
-
-/// The activity log's lines, following the newest.
-private struct LogConsole: View {
-    private var log: LogStore { .shared }
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(log.lines) { line in
-                        Text("\(line.stamp)  \(line.text)")
-                            .font(.system(.caption2, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .id(line.id)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .frame(height: 240)
-            // The last line, not the count, which stops changing once the log is full.
-            .onChange(of: log.lines.last?.id) { _, last in
-                if let last { proxy.scrollTo(last, anchor: .bottom) }
-            }
-        }
-    }
-}
-
-/// “Activity Log (n)”.
-private struct LogHeader: View {
-    /// Observed to redraw on language change.
-    @EnvironmentObject private var loc: Localizer
-
-    var body: some View {
-        Text(L("Activity Log (%d)", LogStore.shared.lines.count))
     }
 }

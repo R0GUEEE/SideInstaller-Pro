@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// Tab container (Install, Tools, About). Each page draws its own
-/// `AppBackground`, since `TabView` would hide a shared one. Also hosts the
-/// sign-in sheet (2FA, and which team signs) and the pages' popups, so they
-/// show over any tab.
+/// `AppBackground`, since `TabView` would hide a shared one; they stay in sync
+/// because the background animates off the clock. Also hosts the 2FA sheet and
+/// the pages' popups, so they show over any tab.
 struct RootView: View {
     /// The tabs and their backdrop level. The selection is tracked so a tab
     /// switch can animate `Backdrop` to the new level.
@@ -24,12 +24,12 @@ struct RootView: View {
     /// One popup, tagged with the page that raised it.
     private enum PopupItem: Hashable {
         case install(Engine.Popup)
+        case sideBySide(SideBySideManager.Popup)
         case pairing(PairingManager.Popup)
         case certificates(ToolPopup)
         case entitlements(EntitlementsManager.Popup)
         case location(ToolPopup)
         case apps(ToolPopup)
-        case jit(ToolPopup)
     }
 
     /// Popups that always come up together, so they share one card.
@@ -43,6 +43,8 @@ struct RootView: View {
         /// A finished install: the news, the trust step, and LiveContainer's
         /// certificate import.
         case installFinished
+        /// Side by Side's pairing code and the steps for their iPhone.
+        case sideBySidePairing
         /// The Pairing page's code and the steps for Settings.
         case pairingPage
     }
@@ -56,33 +58,29 @@ struct RootView: View {
         var id: AnyHashable { group.map { AnyHashable($0) } ?? AnyHashable(items[0]) }
     }
 
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Declared so a language change relabels the tab bar.
     @EnvironmentObject private var loc: Localizer
     /// Watched so switching Apple ID invalidates every cached sign-in below.
     @EnvironmentObject private var accounts: AccountStore
     /// Owned here so they survive tab switches and share the one `Engine`.
     @StateObject private var certManager = CertManager()
-    /// The app's own, shared with the JIT page, which generates a missing
-    /// pairing file with it.
-    @ObservedObject private var pairingManager = PairingManager.shared
-    /// The app's own, shared with the Shortcuts actions.
-    @ObservedObject private var locationManager = LocationManager.shared
+    @StateObject private var pairingManager = PairingManager()
+    @StateObject private var locationManager = LocationManager()
     @StateObject private var entitlementsManager = EntitlementsManager()
-    /// The app's own, shared with the Shortcuts actions.
-    @ObservedObject private var appsManager = SideloadedAppsManager.shared
+    @StateObject private var appsManager = SideloadedAppsManager()
     @StateObject private var sideBySideManager = SideBySideManager()
     /// Sources are loaded once here so their list survives tab switches and the
     /// Inspect page can be opened from a link.
     @StateObject private var sourceStore = SourceStore.shared
     /// The last two-factor prompt shown, so the sheet keeps its content while it
     /// slides away after the sign-in clears it.
-    @State private var shownSignInSheet: SignInSheet?
+    @State private var shownTwoFactor: TwoFactorPhase?
     @State private var page: Page = .install
 
     var body: some View {
         // `.tabItem`/`.tag` rather than iOS 18's `Tab`, to keep iOS 17.
-        TabView(selection: tabSelection) {
+        TabView(selection: $page) {
             ContentView()
                 .tabItem { Label(L("Install"), systemImage: "square.and.arrow.down") }
                 .tag(Page.install)
@@ -146,9 +144,6 @@ struct RootView: View {
         .popupStack(entries, onBackdropTap: backdropTap) { entry in
             card(for: entry)
         }
-        .onChange(of: popups) { old, new in
-            playSound(forShown: new.filter { !old.contains($0) })
-        }
         // The Install tab's revoke-and-retry runs through this same manager
         // (declared below the popups, which use it too).
         .environmentObject(certManager)
@@ -160,67 +155,20 @@ struct RootView: View {
             entitlementsManager.signOut()
             sideBySideManager.signOut()
         }
-        // The sources are checked for updates once when SideInstaller opens,
-        // as SideInstallerApp checks SideInstaller itself, so the Sources tile
-        // can show how many there are.
-        .task { await sourcesManager.checkAtLaunch(apps: appsManager) }
         .tint(Theme.accent)
         .preferredColorScheme(.dark)
         // A swipe down is a cancel; the sign-in closing it is not.
         .sheet(isPresented: Binding(
-            get: { signInSheet != nil },
-            set: { if !$0 { cancel(signInSheet) } }
+            get: { engine.twoFactor != nil },
+            set: { if !$0 { engine.cancelTwoFactor() } }
         )) {
-            switch signInSheet ?? shownSignInSheet {
-            case .twoFactor(let phase): TwoFactorSheet(phase: phase)
-            case .team(let question):   TeamSheet(question: question)
-            case nil:                   EmptyView()
+            if let phase = engine.twoFactor ?? shownTwoFactor {
+                TwoFactorSheet(phase: phase)
             }
         }
-        .onChange(of: signInSheet) { _, sheet in
-            if let sheet { shownSignInSheet = sheet }
+        .onChange(of: engine.twoFactor) { _, phase in
+            if let phase { shownTwoFactor = phase }
         }
-        // Which team signs is asked once per Apple ID.
-        .onChange(of: engine.teamQuestion) { old, question in
-            if let question, old?.request != question.request {
-                SoundEffects.play(.attention)
-            }
-        }
-        .onChange(of: engine.twoFactor) { old, phase in
-            // A code is wanted, or the one entered was turned down.
-            if let phase, phase.isAsking {
-                if old?.signIn != phase.signIn {
-                    SoundEffects.play(.attention)
-                } else if old?.isAsking == false, phase.prompt.lastError != nil {
-                    SoundEffects.play(.error)
-                }
-            }
-        }
-    }
-
-    /// The sign-in sheet's content now. The team question comes once the code
-    /// has gone through, so it takes the sheet over.
-    private var signInSheet: SignInSheet? {
-        if let question = engine.teamQuestion { return .team(question) }
-        return engine.twoFactor.map(SignInSheet.twoFactor)
-    }
-
-    /// Stops the sign-in the sheet asks for, as a swipe down does.
-    private func cancel(_ sheet: SignInSheet?) {
-        switch sheet {
-        case .twoFactor(let phase): engine.cancelTwoFactor(phase)
-        case .team(let question):   engine.cancelTeamQuestion(question)
-        case nil:                   break
-        }
-    }
-
-    /// The tab selection, ticking as the user changes tab.
-    private var tabSelection: Binding<Page> {
-        Binding(get: { page },
-                set: { newPage in
-                    if newPage != page { SoundEffects.play(.tick) }
-                    page = newPage
-                })
     }
 
     // MARK: Popups
@@ -230,12 +178,12 @@ struct RootView: View {
     /// never pushed down out of sight.
     private var popups: [PopupItem] {
         let pages = [engine.popups.map(PopupItem.install),
+                     sideBySideManager.popups.map(PopupItem.sideBySide),
                      pairingManager.popups.map(PopupItem.pairing),
                      certManager.popups.map(PopupItem.certificates),
                      entitlementsManager.popups.map(PopupItem.entitlements),
                      locationManager.popups.map(PopupItem.location),
-                     appsManager.popups.map(PopupItem.apps),
-                     jitManager.popups.map(PopupItem.jit)]
+                     appsManager.popups.map(PopupItem.apps)]
         let waiting = pages.filter { $0.contains(where: blocks) }
         let others = pages.filter { !$0.contains(where: blocks) }
         return Array((waiting + others).joined())
@@ -246,52 +194,17 @@ struct RootView: View {
     private var backdropTap: (() -> Void)? {
         let closable = popups.filter { !blocks($0) }
         guard !closable.isEmpty else { return nil }
-        return {
-            SoundEffects.play(.dismiss)
-            closable.forEach(close)
-        }
-    }
-
-    /// Plays the sound for popups that just came up: an error over a success
-    /// over a request for the user, when several come up at once.
-    private func playSound(forShown items: [PopupItem]) {
-        let sounds = Set(items.compactMap(sound(for:)))
-        if let sound = [UISound.error, .success, .attention].first(where: sounds.contains) {
-            SoundEffects.play(sound)
-        }
-    }
-
-    /// What a popup sounds like as it comes up, if anything.
-    private func sound(for item: PopupItem) -> UISound? {
-        switch item {
-        case .install(.error), .install(.certConflict), .pairing(.error),
-             .certificates(.error), .entitlements(.error), .location(.error), .apps(.error),
-             .jit(.error):
-            .error
-        case .install(.success), .pairing(.success),
-             .certificates(.success), .location(.success), .apps(.success), .jit(.success):
-            .success
-        // Apple granting nothing it was asked for is a failure.
-        case .entitlements(.results(_, let outcomes)):
-            outcomes.contains(where: \.ok) ? .success : .error
-        // A guide that comes up mid-run is what the run waits on; after one,
-        // it comes with the error or the success, which speak for it.
-        case .install(.guide):
-            engine.isRunning ? .attention : nil
-        // Waiting on the user: a code to type, steps to follow, a go-ahead.
-        case .install(.pairingCode), .install(.liveContainerImport), .install(.appIDCost),
-             .install(.link), .pairing(.pairingCode), .pairing(.pairInSettings):
-            .attention
-        }
+        return { closable.forEach(close) }
     }
 
     /// True when a run is waiting on the popup, so closing it stops the run.
     private func blocks(_ item: PopupItem) -> Bool {
         switch item {
         case .install(let popup):    engine.blocks(popup)
+        case .sideBySide(let popup): sideBySideManager.blocks(popup)
         case .pairing(let popup):    pairingManager.blocks(popup)
         // The Tools pages only report; nothing waits on their popups.
-        case .certificates, .entitlements, .location, .apps, .jit: false
+        case .certificates, .entitlements, .location, .apps: false
         }
     }
 
@@ -326,9 +239,11 @@ struct RootView: View {
         // Up on its own, waiting for the go-ahead to sign, or to act on a link.
         case .install(.appIDCost), .install(.link):
             nil
+        case .sideBySide(.pairingCode), .sideBySide(.pairInSettings):
+            .sideBySidePairing
         case .pairing(.pairingCode), .pairing(.pairInSettings):
             .pairingPage
-        case .pairing, .certificates, .entitlements, .location, .apps, .jit:
+        case .sideBySide, .pairing, .certificates, .entitlements, .location, .apps:
             nil
         }
     }
@@ -350,9 +265,11 @@ struct RootView: View {
                 if case .install(.error(_, let stoppedRun)) = item { stoppedRun } else { nil }
             }.first
             return (InstallPopup.errorTitle(stoppedRun: stoppedRun ?? true),
-                    "exclamationmark.triangle", Theme.negative)
+                    "exclamationmark.triangle.fill", .red)
         case .installFinished:
-            return (L("Success: last steps"), "checkmark.seal", Theme.positive)
+            return (L("Success: last steps"), "checkmark.seal.fill", .green)
+        case .sideBySidePairing:
+            return (SideBySidePopup.pairInSettingsTitle, "lock.iphone", Theme.accent)
         case .pairingPage:
             return (PairingPopup.pairInSettingsTitle, "lock.iphone", Theme.accent)
         }
@@ -361,12 +278,12 @@ struct RootView: View {
     private func close(_ item: PopupItem) {
         switch item {
         case .install(let popup):      engine.closePopup(popup)
+        case .sideBySide(let popup):   sideBySideManager.closePopup(popup)
         case .pairing(let popup):      pairingManager.closePopup(popup)
         case .certificates(let popup): certManager.closePopup(popup)
         case .entitlements(let popup): entitlementsManager.closePopup(popup)
         case .location(let popup):     locationManager.closePopup(popup)
         case .apps(let popup):         appsManager.closePopup(popup)
-        case .jit(let popup):          jitManager.closePopup(popup)
         }
     }
 
@@ -396,6 +313,8 @@ struct RootView: View {
         switch item {
         case .install(let popup):
             InstallPopup(popup: popup)
+        case .sideBySide(let popup):
+            SideBySidePopup(manager: sideBySideManager, popup: popup)
         case .pairing(let popup):
             PairingPopup(manager: pairingManager, popup: popup)
         case .certificates(let popup):
@@ -406,8 +325,6 @@ struct RootView: View {
             toolPopup(popup, successTitle: L("Location spoofing")) { locationManager.closePopup(popup) }
         case .apps(let popup):
             toolPopup(popup, successTitle: L("Sideloaded apps")) { appsManager.closePopup(popup) }
-        case .jit(let popup):
-            toolPopup(popup, successTitle: L("JIT")) { jitManager.closePopup(popup) }
         }
     }
 
@@ -431,7 +348,7 @@ struct RootView: View {
 /// devices, text or call). Stays open through wrong codes and resends; closes
 /// when the sign-in returns.
 struct TwoFactorSheet: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Declared so every label redraws when the language changes.
     @EnvironmentObject private var loc: Localizer
 
@@ -443,15 +360,17 @@ struct TwoFactorSheet: View {
     private var prompt: TwoFactorPrompt { phase.prompt }
 
     /// The answer the sign-in is acting on, while it does.
-    private var pending: TwoFactorAnswer? { phase.answer }
+    private var pending: TwoFactorAnswer? {
+        if case .working(_, let answer) = phase { answer } else { nil }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 if let error = prompt.shownError {
                     Section {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundStyle(Theme.warning)
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
                 }
                 Section {
@@ -471,16 +390,12 @@ struct TwoFactorSheet: View {
                             }
                     }
                     if let pending {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
                             ProgressView()
                             Text(status(for: pending))
                                 .foregroundStyle(.secondary)
                         }
                     }
-                } footer: {
-                    // Whose code it is: Side by Side signs in with someone
-                    // else's Apple ID, and can be queued behind the install's.
-                    Label(phase.appleID, systemImage: "person.crop.circle")
                 }
                 Section {
                     options
@@ -493,11 +408,11 @@ struct TwoFactorSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(L("Cancel")) { engine.cancelTwoFactor(phase) }
+                    Button(L("Cancel")) { engine.cancelTwoFactor() }
                 }
                 if prompt.expectsCode {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button(L("Verify")) { engine.answerTwoFactor(.code(code), to: phase) }
+                        Button(L("Verify")) { engine.answerTwoFactor(.code(code)) }
                             .disabled(pending != nil || code.count != 6)
                     }
                 }
@@ -505,18 +420,11 @@ struct TwoFactorSheet: View {
         }
         .onAppear { codeFocused = prompt.expectsCode }
         .onChange(of: phase) { _, phase in
-            // Checking an answer disables the field, which takes the keyboard
-            // away. Unfocused here too, so focusing it again below is a change.
-            guard phase.isAsking else {
-                codeFocused = false
-                return
-            }
             // A fresh prompt — after a wrong code, or with a new code on its way —
             // starts from an empty field.
+            guard case .asking(let prompt) = phase else { return }
             code = ""
-            // Focused a turn later: until then the field is still disabled, or
-            // not there yet after choosing how to get a code, and can't take it.
-            Task { @MainActor in codeFocused = phase.prompt.expectsCode }
+            codeFocused = prompt.expectsCode
         }
     }
 
@@ -545,7 +453,7 @@ struct TwoFactorSheet: View {
     }
 
     private func option(_ title: String, _ systemImage: String, _ answer: TwoFactorAnswer) -> some View {
-        Button { engine.answerTwoFactor(answer, to: phase) } label: {
+        Button { engine.answerTwoFactor(answer) } label: {
             Label(title, systemImage: systemImage)
         }
     }

@@ -32,13 +32,6 @@ let portugueseStrings: [String: String] = [
     "This iPhone runs iOS %@. Only iOS %@ can pair with itself, so you'll have to make a pairing file on a computer — with jitterbugpair or pymobiledevice3 — and import it in the app. SideInstaller walks you through it.":
         "Este iPhone tem o iOS %@. Só o iOS %@ consegue parear consigo mesmo, então você vai precisar criar um arquivo de pareamento num computador — com o jitterbugpair ou o pymobiledevice3 — e importá-lo no app. O SideInstaller te guia pelo processo.",
 
-    // iOS 27 runs on this iPhone: recommended at setup
-
-    "Update to iOS %@": "Atualize para o iOS %@",
-    "This iPhone can run iOS %@, where SideInstaller works without a computer: the iPhone pairs with itself, so there's no pairing file to make. Update in Settings › General › Software Update.":
-        "Este iPhone pode rodar o iOS %@, em que o SideInstaller funciona sem computador: o iPhone pareia consigo mesmo, então não é preciso criar um arquivo de pareamento. Atualize em Ajustes › Geral › Atualização de Software.",
-    "OK": "OK",
-
     // MARK: - Account setup & Settings › Account
 
     "Sign in with your Apple ID": "Entre com seu Apple ID",
@@ -147,8 +140,6 @@ let portugueseStrings: [String: String] = [
     "Replace": "Substituir",
     "or": "ou",
     "Paste a download link": "Cole um link de download",
-    "SideInstaller recognizes this as %@ and sets it up just like its own download.":
-        "O SideInstaller reconhece isto como %@ e o configura como se ele mesmo o tivesse baixado.",
     "Downloading… %d%%": "Baixando… %d%%",
     "iOS %@ required": "É necessário o iOS %@",
     "This iPhone runs iOS %@, which SideInstaller can't install on. Update to iOS %@ or later in Settings › General › Software Update.":
@@ -199,10 +190,6 @@ let portugueseStrings: [String: String] = [
     "Sign in to Apple ID": "Entrar no Apple ID",
     "Download %@": "Baixar o %@",
     "Use your imported IPA": "Usar o IPA importado",
-    "Use a custom .ipa instead": "Usar um .ipa personalizado",
-    "Pick an .ipa to install.": "Escolha o .ipa a instalar.",
-    "Signed with the Apple ID and installed as it is, without a pairing file.": "Assinado com o Apple ID e instalado como está, sem arquivo de pareamento.",
-    "Open %@.": "Abra o app %@.",
     "Sign the app": "Assinar o app",
     "Finish setup": "Concluir a configuração",
 
@@ -295,11 +282,10 @@ let portugueseStrings: [String: String] = [
         "Só o certificado com que o SideInstaller assina pode ser exportado: a chave privada de qualquer outro fica no dispositivo que o pediu à Apple.",
     "Couldn't export the certificate: %@": "Não foi possível exportar o certificado: %@",
     "Export certificate": "Exportar certificado",
-    "Password (optional)": "Senha (opcional)",
     "Export": "Exportar",
     "Exporting": "Exportando",
-    "Saves this certificate and its private key as a .p12 file, for another signing app or a computer to sign with. Choose a password, which you'll need to import the file, or leave it empty: signing apps import it without one, but a Mac won't. Keep the file to yourself.":
-        "Salva este certificado e a chave privada dele em um arquivo .p12, para outro app de assinatura ou um computador assinar com ele. Escolha uma senha, necessária para importar o arquivo, ou deixe o campo vazio: os apps de assinatura o importam sem senha, mas um Mac não. Não o passe para ninguém.",
+    "Saves this certificate and its private key as a .p12 file, for another signing app or a computer to sign with. Choose a password for it: you'll need it to import the file. Keep the file to yourself.":
+        "Salva este certificado e a chave privada dele em um arquivo .p12, para outro app de assinatura ou um computador assinar com ele. Escolha uma senha: você vai precisar dela para importar o arquivo. Não o passe para ninguém.",
     "SideInstaller can export only the certificate it signs with, and none of these is it: a certificate's private key stays on the device that asked Apple for it.":
         "O SideInstaller só pode exportar o certificado com que assina, e nenhum destes é ele: a chave privada de um certificado fica no dispositivo que o pediu à Apple.",
     "SideInstaller signs with this one": "O SideInstaller assina com este",
@@ -322,12 +308,6 @@ let portugueseStrings: [String: String] = [
     "Couldn't use that certificate: %@": "Não foi possível usar esse certificado: %@",
     "SideStore isn't installed on this iPhone, so there's no certificate to get from it.":
         "O SideStore não está instalado neste iPhone, então não há certificado para pegar dele.",
-    "Inside LiveContainer, SideStore can't send its certificate back to SideInstaller, and LiveContainer doesn't hold one yet. In LiveContainer's Settings, tap “Import Certificate From SideStore” (sign in to SideStore first if it has no certificate), then try again here.":
-        "Dentro do LiveContainer, o SideStore não consegue devolver o certificado dele ao SideInstaller, e o LiveContainer ainda não tem um. Nas Settings do LiveContainer, toque em “Import Certificate From SideStore” (entre no SideStore primeiro se ele não tiver certificado) e tente de novo aqui.",
-    "The certificate LiveContainer holds for SideStore isn't one of this Apple ID's: it has been revoked, or it belongs to another Apple ID. Nothing was changed. If SideStore has made a new one since, tap “Refresh Certificate from SideStore” in LiveContainer's Settings, then try again here.":
-        "O certificado que o LiveContainer guarda para o SideStore não é deste Apple ID: ele foi revogado ou pertence a outro Apple ID. Nada foi alterado. Se o SideStore criou um novo desde então, toque em “Refresh Certificate from SideStore” nas Settings do LiveContainer e tente de novo aqui.",
-    "SideInstaller takes SideStore's certificate from LiveContainer and signs with it too, so on a free Apple ID neither app has to revoke the other's.":
-        "O SideInstaller pega o certificado do SideStore no LiveContainer e também assina com ele, então com um Apple ID gratuito nenhum dos dois apps precisa revogar o do outro.",
     "Sign with this certificate?": "Assinar com este certificado?",
     "A link sent SideInstaller a signing certificate. Only use it if you asked for one: SideInstaller will sign apps with it from now on, in place of its own. It's used only if it's one of your Apple ID's certificates.":
         "Um link enviou ao SideInstaller um certificado de assinatura. Só use se você pediu um: a partir de agora o SideInstaller vai assinar os apps com ele, no lugar do próprio. Ele só é usado se for um dos certificados do seu Apple ID.",
@@ -525,36 +505,57 @@ let portugueseStrings: [String: String] = [
 
     "Side by Side": "Side by Side",
     "Pair with their iPhone": "Parear com o iPhone dele",
+    "Sign in to their Apple ID": "Entrar no Apple ID dele",
+    "Download SideInstaller": "Baixar o SideInstaller",
     "Install on their iPhone": "Instalar no iPhone dele",
+    "“%@” isn't an IPv4 address. It should look like 192.168.1.42.":
+        "“%@” não é um endereço IPv4. Ele deve ser parecido com 192.168.1.42.",
+    "%@ is an address this iPhone already holds. Side by Side installs onto someone else's iPhone — use theirs. To install on this one, use the Install tab.":
+        "%@ é um endereço que este iPhone já tem. O Side by Side instala no iPhone de outra pessoa — use o dela. Para instalar neste aqui, use a aba Instalar.",
     "The iPhone that paired was this one. Pair from their iPhone's Settings instead. To install on this iPhone, use the Install tab.":
         "O iPhone que pareou foi este. Faça o pareamento pelos Ajustes do iPhone dele. Para instalar neste iPhone, use a aba Instalar.",
     "Enter the Apple ID to sign with, and its password.":
         "Digite o Apple ID que vai assinar o app e a senha dele.",
     "Wi-Fi is off. Both iPhones have to be on the same Wi-Fi network for this to work.":
         "O Wi-Fi está desligado. Os dois iPhones precisam estar na mesma rede Wi-Fi para isso funcionar.",
-    "The release download wasn't an IPA. GitHub may be returning an error page, so try again in a minute.":
-        "O download da versão não era um IPA. O GitHub pode estar devolvendo uma página de erro, então tente de novo daqui a pouco.",
+    "The release download wasn't an IPA. GitHub may be returning an error page — try again in a minute.":
+        "O download da versão não era um IPA. O GitHub pode estar devolvendo uma página de erro — tente de novo daqui a pouco.",
     "Couldn't download the latest SideInstaller release: %@":
         "Não foi possível baixar a versão mais recente do SideInstaller: %@",
     "No SideInstaller IPA downloaded.": "Nenhum IPA do SideInstaller foi baixado.",
-    "Apple won't issue a signing certificate for this Apple ID: it reports that one already exists (error 7460). One has to be revoked first. Use the Certificates tool if this is the Apple ID saved in Settings › Account, or developer.apple.com signed in as it otherwise.":
-        "A Apple não emite um certificado de assinatura para este Apple ID: ela informa que já existe um (erro 7460). É preciso revogar um antes. Use a ferramenta Certificados, se este for o Apple ID salvo em Ajustes › Conta, ou developer.apple.com conectado com ele, caso contrário.",
+    "Apple won't issue a signing certificate for this Apple ID: it reports that one already exists (error 7460). One has to be revoked first — with the Certificates tool if this is the Apple ID saved in Settings › Account, and at developer.apple.com signed in as it otherwise.":
+        "A Apple não emite um certificado de assinatura para este Apple ID: ela informa que já existe um (erro 7460). É preciso revogar um antes — pela ferramenta Certificados, se este for o Apple ID salvo em Ajustes › Conta, ou em developer.apple.com conectado com ele, caso contrário.",
     "Apple wouldn't register their iPhone with this Apple ID's developer team, so it won't issue a provisioning profile. %@":
         "A Apple não registrou o iPhone dele na equipe de desenvolvimento deste Apple ID, então não vai emitir um perfil de provisionamento. %@",
     "No pair record for their iPhone.": "Nenhum registro de pareamento para o iPhone dele.",
-    "The link to their iPhone dropped. Start again.":
-        "A conexão com o iPhone dele caiu. Comece de novo.",
+    "The link to their iPhone dropped — start again.":
+        "A conexão com o iPhone dele caiu — comece de novo.",
     "Set up someone else's iPhone": "Configure o iPhone de outra pessoa",
     "Same Wi-Fi network": "Mesma rede Wi-Fi",
+    "Their iPhone needs iOS %@ — SideInstaller pairs itself once it's installed, and nothing older can.":
+        "O iPhone dele precisa do iOS %@: depois de instalado, o SideInstaller se pareia sozinho, e versões anteriores não conseguem.",
+    "Their iPhone": "O iPhone dele",
+    "IP address (optional)": "Endereço IP (opcional)",
+    "Optional: leave it empty, and it fills in when their iPhone pairs.":
+        "Opcional: deixe vazio e ele é preenchido quando o iPhone dele parear.",
+    "On their iPhone: Settings › Wi-Fi › ⓘ next to the network, then “IP Address”.":
+        "No iPhone dele: Ajustes › Wi-Fi › ⓘ ao lado da rede e depois “Endereço IP”.",
+    "This iPhone is %@, so theirs will look similar.":
+        "Este iPhone é %@, então o dele será parecido.",
     "Apple ID to sign with": "Apple ID que vai assinar",
+    "Tip: Use the iPhone/iPad owner's Apple account credentials":
+        "Dica: use as credenciais da conta Apple do dono do iPhone/iPad",
+    "Use my saved Apple ID instead": "Usar o meu Apple ID salvo",
+    "Steps": "Etapas",
+    "Waiting for them to tap Trust…": "Aguardando ele tocar em Confiar…",
     "Waiting for them to pair in Settings…":
         "Aguardando ele parear nos Ajustes…",
     "Waiting for them to enter the code…":
         "Aguardando ele digitar o código…",
     "Pair their iPhone in Settings":
         "Pareie o iPhone dele nos Ajustes",
-    "Their iPhone won't ask by itself. Pairing starts from its Settings.":
-        "O iPhone dele não vai pedir sozinho. O pareamento começa nos Ajustes dele.",
+    "Their iPhone won't ask by itself — pairing starts from its Settings.":
+        "O iPhone dele não vai pedir sozinho — o pareamento começa nos Ajustes dele.",
     "On their iPhone, open Settings › Privacy & Security › Developer Mode.":
         "No iPhone dele, abra Ajustes › Privacidade e Segurança › Modo de Desenvolvedor.",
     "Tap “Pair with %@”.":
@@ -565,75 +566,32 @@ let portugueseStrings: [String: String] = [
         "Digite o código que aparece aqui no aviso do iPhone dele.",
     "Type this into the prompt on their iPhone.":
         "Digite este código no aviso que aparece no iPhone dele.",
-    "SideInstaller is already waiting for an iPhone to pair with it, from the Install tab, the Pairing page, or an earlier attempt here. Finish that pairing, or close and reopen SideInstaller, then try again.":
-        "O SideInstaller já está esperando um iPhone parear com ele, pela aba Instalar, pela página Pareamento ou por uma tentativa anterior aqui. Termine esse pareamento, ou feche e abra o SideInstaller de novo, e tente outra vez.",
+    "They tapped “Don't Trust” on their iPhone. Start again, and have them tap Trust.":
+        "Ele tocou em “Não Confiar” no iPhone dele. Comece de novo e peça para ele tocar em Confiar.",
+    "SideInstaller is already waiting for an iPhone to pair with it — from the Install tab, the Pairing page, or an earlier attempt here. Finish that pairing, or close and reopen SideInstaller, then try again.":
+        "O SideInstaller já está esperando um iPhone parear com ele — pela aba Instalar, pela página Pareamento ou por uma tentativa anterior aqui. Termine esse pareamento, ou feche e abra o SideInstaller de novo, e tente outra vez.",
     "Pairing with their iPhone didn't finish: %@":
         "O pareamento com o iPhone dele não terminou: %@",
     "Their iPhone at %@ refused the connection. It only accepts one while Developer Mode is on, and iOS asks to confirm Developer Mode again after every restart: on their iPhone, turn it on under Settings › Privacy & Security › Developer Mode, then try again.":
         "O iPhone dele em %@ recusou a conexão. Ele só aceita com o Modo de Desenvolvedor ligado, e o iOS pede para confirmar de novo depois de cada reinício: no iPhone dele, ative em Ajustes › Privacidade e Segurança › Modo de Desenvolvedor e tente outra vez.",
-    "Couldn't reach their iPhone at %@. Check that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.":
-        "Não foi possível alcançar o iPhone dele em %@. Confira se os dois iPhones estão na mesma rede Wi-Fi e se a Rede Local está ativada para o SideInstaller nos Ajustes deste iPhone. Redes de convidados e redes públicas muitas vezes impedem que os aparelhos se comuniquem.",
+    "Couldn't reach their iPhone at %@. Check the address (Settings › Wi-Fi › ⓘ on their iPhone), that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.":
+        "Não foi possível alcançar o iPhone dele em %@. Confira o endereço (Ajustes › Wi-Fi › ⓘ no iPhone dele), se os dois iPhones estão na mesma rede Wi-Fi e se a Rede Local está ativada para o SideInstaller nos Ajustes deste iPhone. Redes de convidados e redes públicas muitas vezes impedem que os aparelhos se comuniquem.",
     "The link to their iPhone didn't come up: %@":
         "Não foi possível abrir a conexão com o iPhone dele: %@",
     "%d%% downloaded": "%d%% baixado",
     "%d%% uploaded": "%d%% enviado",
     "Start the install": "Iniciar a instalação",
+    "Install again": "Instalar de novo",
     "Clear their details": "Limpar os dados dele",
     "This iPhone is still paired with theirs. Clearing forgets it.":
         "Este iPhone ainda está pareado com o dele. Limpar desfaz esse pareamento.",
+    "Last step: they trust %@": "Última etapa: ele confia no %@",
     "On their iPhone: Settings › General › VPN & Device Management.":
         "No iPhone dele: Ajustes › Geral › VPN e Gerenciamento de Dispositivo.",
     "Tap the Apple ID under “Developer App”, then tap Trust.":
         "Toque no Apple ID em “App do Desenvolvedor” e depois em Confiar.",
-
-    // MARK: - Side by Side, step by step
-
-    "Needs LocalDevVPN on their iPhone": "Requer o LocalDevVPN no iPhone dele",
-    "Couldn't download %@: %@": "Não foi possível baixar %@: %@",
-    "Their iPhone already has three apps signed with a free Apple ID, the most iOS allows, counting expired ones. They need to delete one, then you can try again.":
-        "O iPhone dele já tem três apps assinados com um Apple ID gratuito, o máximo que o iOS permite, contando os expirados. É preciso apagar um, e então você pode tentar de novo.",
-    "%@ is on their iPhone, but its pairing file couldn't be added (%@). Run Side by Side again, or import a pairing file in %@.":
-        "%@ está no iPhone dele, mas não foi possível adicionar o arquivo de pareamento (%@). Rode o Side by Side de novo ou importe um arquivo de pareamento no %@.",
-    "Get started": "Começar",
-    "What should go on their iPhone?": "O que vai para o iPhone dele?",
-    "Pick one. You can come back for another one later.":
-        "Escolha um. Você pode voltar para outro depois.",
-    "Which Apple ID signs it?": "Qual Apple ID assina?",
-    "The app is signed with it, and needs it again every 7 days to keep opening. Use the iPhone owner's.":
-        "O app é assinado com ele e precisa dele de novo a cada 7 dias para continuar abrindo. Use o do dono do iPhone.",
-    "Their Apple ID": "O Apple ID dele",
-    "Recommended: they keep their apps signed with it.":
-        "Recomendado: com ele, os apps dele continuam assinados.",
-    "My Apple ID": "Meu Apple ID",
-    "Only if you'll keep their apps signed yourself: they won't have this Apple ID's password.":
-        "Só se você mesmo for manter os apps dele assinados: ele não terá a senha deste Apple ID.",
-    "Used for this install only, and never saved.": "Usado só nesta instalação e nunca salvo.",
-    "Apple may send a code to their devices, so keep their iPhone close.":
-        "A Apple pode enviar um código para os dispositivos dele: mantenha o iPhone dele por perto.",
-    "Get their iPhone ready": "Prepare o iPhone dele",
-    "Do this on their iPhone, then start.": "Faça isto no iPhone dele e depois comece.",
-    "Connect their iPhone to the same Wi-Fi network as this one.":
-        "Conecte o iPhone dele à mesma rede Wi-Fi deste.",
-    "Turn on Developer Mode under Settings › Privacy & Security › Developer Mode, and confirm it after the restart.":
-        "Ative o Modo de Desenvolvedor em Ajustes › Privacidade e Segurança › Modo de Desenvolvedor e confirme depois de reiniciar.",
-    "Unlock their iPhone and keep it next to this one.":
-        "Desbloqueie o iPhone dele e deixe-o ao lado deste.",
-    "Installing %@ on their iPhone": "Instalando %@ no iPhone dele",
-    "Waiting for their iPhone…": "Aguardando o iPhone dele…",
-    "Looking for their iPhone…": "Procurando o iPhone dele…",
-    "Handing over the pairing file…": "Entregando o arquivo de pareamento…",
-    "Change details": "Alterar dados",
-    "%@ is on their iPhone": "%@ está no iPhone dele",
-    "Finish on their iPhone": "Conclua no iPhone dele",
-    "This iPhone no longer keeps a pairing with theirs.":
-        "Este iPhone não guarda mais um pareamento com o dele.",
-    "Install another app": "Instalar outro app",
-    "Get LocalDevVPN from the App Store and connect it: SideStore works through it.":
-        "Baixe o LocalDevVPN na App Store e conecte-o: o SideStore funciona por ele.",
-    "Open SideStore and sign in with the same Apple ID. Its pairing file is already in place.":
-        "Abra o SideStore e entre com o mesmo Apple ID. O arquivo de pareamento já está no lugar.",
-    "Open LiveContainer, go to its Settings tab, and tap “Import Certificate From SideStore”.":
-        "Abra o LiveContainer, vá até a aba Settings e toque em “Import Certificate From SideStore”.",
+    "Open it from their Home Screen — they're set up.":
+        "Abra pela Tela de Início dele — está tudo pronto.",
 
     // MARK: - Settings
 
@@ -641,19 +599,11 @@ let portugueseStrings: [String: String] = [
     "Done": "OK",
     "Language": "Idioma",
     "App language": "Idioma do app",
-    "Sounds": "Sons",
-    "Sound effects": "Efeitos sonoros",
     "Auto": "Automático",
     // The Tunnel section: starting LocalDevVPN from here.
     "Tunnel": "Túnel",
     "Something at %@:%d refused the connection, so the tunnel is carrying traffic — the device just isn't listening on its pairing port. That port only opens while Developer Mode is on, and iOS asks for it again after every restart: turn it on under Settings › Privacy & Security › Developer Mode, then try again. If it's already on, pair this iPhone again under “Pairing file”.":
         "Algo em %@:%d recusou a conexão, então o túnel está funcionando: é o dispositivo que não está escutando na porta de pareamento. Essa porta só abre com o Modo de Desenvolvedor ligado, e o iOS pede de novo depois de cada reinício: ative em Ajustes › Privacidade e Segurança › Modo de Desenvolvedor e tente outra vez. Se já estiver ligado, pareie este iPhone de novo em “Arquivo de pareamento”.",
-    "Something at %@:%d refused the connection, so the tunnel is carrying traffic, but this iPhone isn't listening on its pairing port: Developer Mode is off. Turn it on under Settings › Privacy & Security › Developer Mode (the iPhone restarts), then try again.":
-        "Algo em %@:%d recusou a conexão, então o túnel está funcionando, mas este iPhone não está escutando na porta de pareamento: o Modo de Desenvolvedor está desligado. Ative em Ajustes › Privacidade e Segurança › Modo de Desenvolvedor (o iPhone reinicia) e tente outra vez.",
-    "Something at %@:%d refused the connection, so the tunnel is carrying traffic, but this iPhone isn't listening on its pairing port, although Developer Mode is on. Pair this iPhone again under “Pairing file”, then try again. If it still fails, restart the iPhone.":
-        "Algo em %@:%d recusou a conexão, então o túnel está funcionando, mas este iPhone não está escutando na porta de pareamento, embora o Modo de Desenvolvedor esteja ligado. Pareie este iPhone de novo em “Arquivo de pareamento” e tente outra vez. Se ainda falhar, reinicie o iPhone.",
-    "Something at %@:%d took the connection but didn't answer as this iPhone's pairing port, and no other port answered as one either. Check that LocalDevVPN is the VPN that's on and that Developer Mode is on (Settings › Privacy & Security › Developer Mode), then try again. If it still fails, restart the iPhone.":
-        "Algo em %@:%d aceitou a conexão, mas não respondeu como a porta de pareamento deste iPhone, e nenhuma outra porta respondeu como ela. Verifique se a VPN ligada é a LocalDevVPN e se o Modo de Desenvolvedor está ligado (Ajustes › Privacidade e Segurança › Modo de Desenvolvedor) e tente outra vez. Se ainda falhar, reinicie o iPhone.",
     "Start LocalDevVPN when needed": "Iniciar o LocalDevVPN quando for preciso",
     "Start LocalDevVPN now": "Iniciar o LocalDevVPN agora",
     "LocalDevVPN isn't installed. Get it from the App Store, and this can start it for you.":
@@ -686,9 +636,6 @@ let portugueseStrings: [String: String] = [
     "Advanced": "Avançado",
     "Clear": "Limpar",
     "Activity Log (%d)": "Registro de atividade (%d)",
-    "Verbose logging": "Registro detalhado",
-    "Adds the messages exchanged with iOS to the log, for tracking down a connection problem. Leave it off otherwise, as they quickly fill the log.":
-        "Adiciona ao registro as mensagens trocadas com o iOS, para encontrar um problema de conexão. Fora isso, deixe desligado, pois elas enchem o registro rapidamente.",
 
     // Settings › Developer Mode: AMFI requests over the device link.
     "Developer Mode": "Modo de Desenvolvedor",
@@ -742,12 +689,6 @@ let portugueseStrings: [String: String] = [
         "o que foi baixado como %@ não é um IPA — algo nesta rede devolveu uma página no lugar, ou a transferência parou no meio.",
     "that link answered HTTP %d — it isn't a direct download, or it needs a sign-in.":
         "esse link respondeu HTTP %d — ele não é um download direto, ou exige que você entre numa conta.",
-    "GitHub has no build of %@'s %@ branch to download right now.":
-        "O GitHub não tem agora nenhuma versão do branch %2$@ de %1$@ para baixar.",
-    "couldn't download %@ through nightly.link, which passes on GitHub's builds: %@":
-        "não foi possível baixar %@ pelo nightly.link, que repassa as versões compiladas pelo GitHub: %@",
-    "the %@ build that arrived isn't the file GitHub recorded, so it isn't installed. Try again later.":
-        "a versão de %@ que chegou não é o arquivo que o GitHub registrou, então ela não será instalada. Tente de novo mais tarde.",
 
     // MARK: - Engine failures
 
@@ -849,15 +790,6 @@ let portugueseStrings: [String: String] = [
         "Para instalá-lo mesmo assim, consiga o .ipa dele em uma fonte em que você confie, dê a ele o nome %@ e copie-o para Arquivos › No meu iPhone › SideInstaller.",
     "Then tap Install again — SideInstaller uses your file instead of downloading one.":
         "Depois, toque em Instalar de novo — o SideInstaller usa o seu arquivo em vez de baixar um.",
-    "If you reach GitHub through a VPN or proxy app, turn off LocalDevVPN and turn that one on: iOS runs only one VPN at a time.":
-        "Se você acessa o GitHub por um app de VPN ou proxy, desative o LocalDevVPN e ative esse app: o iOS mantém só uma VPN por vez.",
-    "Tap “Get the .ipa” below and save the file, or download it on another device and bring it over.":
-        "Toque em “Obter o .ipa” abaixo e salve o arquivo, ou baixe-o em outro aparelho e traga-o para cá.",
-    "Back in SideInstaller, pick Custom .ipa under Install, tap “Import .ipa” and choose the file. SideInstaller recognizes %@ and sets it up just like its own download.":
-        "De volta ao SideInstaller, escolha .ipa personalizado em Instalar, toque em “Importar .ipa” e escolha o arquivo. O SideInstaller reconhece %@ e o configura como se ele mesmo o tivesse baixado.",
-    "Turn LocalDevVPN back on, then tap Install.":
-        "Ative o LocalDevVPN de novo e toque em Instalar.",
-    "Get the .ipa": "Obter o .ipa",
     "Pair this iPhone in Settings": "Pareie este iPhone nos Ajustes",
     "Open the Settings app, then go to Privacy & Security › Developer Mode.":
         "Abra o app Ajustes e vá em Privacidade e Segurança › Modo de Desenvolvedor.",
@@ -1062,7 +994,6 @@ let portugueseStrings: [String: String] = [
         "Pelo apoio e por apontar os erros que foram corrigidos por causa dele.",
     "For the Japanese translation.": "Pela tradução para o japonês.",
     "For the Korean translation.": "Pela tradução para o coreano.",
-    "For the Turkish translation.": "Pela tradução para o turco.",
 
     "Built with": "Feito com",
     "The open source work this app is built on:":
@@ -1071,8 +1002,6 @@ let portugueseStrings: [String: String] = [
         "O pareamento, o túnel e a própria instalação. De jkcoxson, MIT.",
     "Apple ID sign in, certificates and signing on the device. By nab138, MIT.":
         "Login no Apple ID, certificados e assinatura no próprio aparelho. De nab138, MIT.",
-    "The code signer isideload uses for each app. By Dadoum, LGPL-2.1.":
-        "O assinador de código que o isideload usa em cada app. De Dadoum, LGPL-2.1.",
     "The sideloading app this installs for you.": "O app de sideload que isto instala para você.",
     "Runs sideloaded apps without spending an app slot on each one.":
         "Roda apps de sideload sem gastar um espaço de app com cada um.",
@@ -1141,14 +1070,6 @@ let portugueseStrings: [String: String] = [
         "O SideStore abre e devolve o arquivo de pareamento que tem.",
     "SideStore isn't installed on this iPhone, so there's no pairing file to get from it.":
         "O SideStore não está instalado neste iPhone, então não há arquivo de pareamento para pegar dele.",
-    "SideInstaller takes the pairing file LiveContainer's built-in SideStore has.":
-        "O SideInstaller pega o arquivo de pareamento do SideStore integrado ao LiveContainer.",
-    "This is the pairing file LiveContainer's built-in SideStore has. SideInstaller will connect to this iPhone with it.":
-        "Este é o arquivo de pareamento do SideStore integrado ao LiveContainer. O SideInstaller vai usá-lo para se conectar a este iPhone.",
-    "In LiveContainer's Multitask Mode, SideInstaller can't open the built-in SideStore's files. Open SideInstaller in LiveContainer without Multitask Mode, then try again, or tap “Import pairing file” and pick the file your computer made.":
-        "No Modo Multitarefa do LiveContainer, o SideInstaller não consegue abrir os arquivos do SideStore integrado. Abra o SideInstaller no LiveContainer fora do Modo Multitarefa e tente de novo, ou toque em “Importar arquivo de pareamento” e escolha o arquivo que seu computador criou.",
-    "Inside LiveContainer, SideStore can't send its pairing file back to SideInstaller, and LiveContainer's built-in SideStore has none that SideInstaller can use. Tap “Import pairing file” and pick the file your computer made, or import one into SideStore first, then try again here.":
-        "Dentro do LiveContainer, o SideStore não consegue devolver o arquivo de pareamento ao SideInstaller, e o SideStore integrado ao LiveContainer não tem nenhum que o SideInstaller possa usar. Toque em “Importar arquivo de pareamento” e escolha o arquivo que seu computador criou, ou importe um no SideStore primeiro e tente de novo aqui.",
     "That install link has no .ipa in it. It needs ?url= followed by the https:// address the .ipa downloads from.":
         "Esse link de instalação não tem nenhum .ipa. Ele precisa de ?url= seguido do endereço https:// de onde o .ipa é baixado.",
     "That link was meant to carry a pairing file, but what it holds can't be read.":
@@ -1173,12 +1094,6 @@ let portugueseStrings: [String: String] = [
     "not connected": "não conectado",
     "none": "nenhum",
     "made on this iPhone": "criado neste iPhone",
-    "Runs inside LiveContainer": "Rodando dentro do LiveContainer",
-    "on": "ligado",
-    "off": "desligado",
-    "unknown": "desconhecido",
-    "yes": "sim",
-    "no": "não",
     "latest": "mais recente",
     "custom server": "servidor personalizado",
     "Auto, starts with %@": "Auto, começa por %@",
@@ -1199,14 +1114,8 @@ let portugueseStrings: [String: String] = [
     "Share the report": "Compartilhar o relatório",
     "Preview the report": "Ver o relatório",
     "Report": "Relatório",
-    "The issue opens filled in. When the log is too long for that, SideInstaller copies it for you to paste at the end of the issue. The whole report is also saved in %@.":
-        "A issue abre já preenchida. Quando o registro é longo demais para isso, o SideInstaller o copia para você colar no fim da issue. O relatório completo também fica salvo em %@.",
-    "Files › On My iPhone": "Arquivos › No Meu iPhone",
-    "Copy the full log": "Copiar o registro completo",
-    "Paste the log into the issue": "Cole o registro na issue",
-    "Open GitHub": "Abrir o GitHub",
-    "The full log is too long to fill in, so SideInstaller copied it. On GitHub, tap the end of the text, choose Paste, then submit the issue.":
-        "O registro completo é longo demais para ser preenchido, então o SideInstaller o copiou. No GitHub, toque no fim do texto, escolha Colar e envie a issue.",
+    "The report is saved in Files › On My iPhone › SideInstaller › Reports. On GitHub, attach it with “Paste, drop, or click to add files” below the text, then submit the issue.":
+        "O relatório fica salvo em Arquivos › No Meu iPhone › SideInstaller › Reports. No GitHub, anexe-o com “Paste, drop, or click to add files” abaixo do texto e envie a issue.",
     "Describe the problem above first.": "Descreva o problema acima primeiro.",
     "Couldn't save the report: %@": "Não foi possível salvar o relatório: %@",
 
@@ -1234,214 +1143,4 @@ let portugueseStrings: [String: String] = [
         "Usar uma cópia não oficial?",
     "If this copy was changed, it can send your Apple ID and password to someone else. Continue only if you trust where it came from.":
         "Se esta cópia foi alterada, ela pode enviar seu Apple ID e sua senha para outra pessoa. Continue apenas se você confia na origem dela.",
-
-    // MARK: - Side by Side: their address, and the pairing file SideInstaller gets
-
-    "Couldn't reach their iPhone at %@. Check the address (Settings › Wi-Fi › ⓘ on their iPhone), that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.":
-        "Não foi possível alcançar o iPhone dele em %@. Confira o endereço (Ajustes › Wi-Fi › ⓘ no iPhone dele), se os dois iPhones estão na mesma rede Wi-Fi e se a Rede Local está ativada para o SideInstaller nos Ajustes deste iPhone. Redes de convidados e redes públicas muitas vezes impedem que os aparelhos se comuniquem.",
-    "Their iPhone": "O iPhone dele",
-    "They tapped “Don't Trust” on their iPhone. Start again, and have them tap Trust.":
-        "Ele tocou em “Não Confiar” no iPhone dele. Comece de novo e peça para ele tocar em Confiar.",
-    "Pairs from its Settings": "Pareia pelos Ajustes",
-    "Waiting for them to tap Trust…": "Aguardando ele tocar em Confiar…",
-    "Tap Trust on their iPhone": "Toque em Confiar no iPhone dele",
-    "On their iPhone: Settings › Wi-Fi › ⓘ next to the network, then “IP Address”.":
-        "No iPhone dele: Ajustes › Wi-Fi › ⓘ ao lado da rede e depois “Endereço IP”.",
-    "Unlock their iPhone, then tap Trust in the prompt that comes up.":
-        "Desbloqueie o iPhone dele e toque em Confiar no aviso que aparecer.",
-    "This iPhone is %@, so theirs will look similar.": "Este iPhone é %@, então o dele será parecido.",
-    "“%@” isn't an IPv4 address. It should look like 192.168.1.42.":
-        "“%@” não é um endereço IPv4. Ele deve ser parecido com 192.168.1.42.",
-    "Do you have the device's IP?": "Você tem o IP do aparelho?",
-    "Optional": "Opcional",
-    "SideInstaller asks their iPhone to pair directly. Needed below iOS 27.":
-        "O SideInstaller pede ao iPhone dele que se pareie diretamente. Necessário abaixo do iOS 27.",
-    "Their iPhone pairs from its own Settings, which needs iOS 27.":
-        "O iPhone dele se pareia pelos próprios Ajustes, o que exige o iOS 27.",
-    "IP address": "Endereço IP",
-    "Their iPhone runs iOS %@. From iOS 26.4 on, SideInstaller can't use the pairing their iPhone gives over Wi-Fi, so it needs a pairing file made on a computer.":
-        "O iPhone dele está no iOS %@. A partir do iOS 26.4, o SideInstaller não consegue usar o pareamento que o iPhone dele dá pelo Wi-Fi, então precisa de um arquivo de pareamento feito num computador.",
-    "Get LocalDevVPN from the App Store and connect it: SideInstaller works through it.":
-        "Baixe o LocalDevVPN na App Store e conecte-o: o SideInstaller funciona por ele.",
-    "Open SideInstaller. Its pairing file is already in place.":
-        "Abra o SideInstaller. O arquivo de pareamento já está no lugar.",
-    "Open SideInstaller and import a pairing file made on a computer.":
-        "Abra o SideInstaller e importe um arquivo de pareamento feito num computador.",
-    "%@ is an address this iPhone already holds. Side by Side installs onto someone else's iPhone, so use theirs. To install on this one, use the Install tab.":
-        "%@ é um endereço que este iPhone já tem. O Side by Side instala no iPhone de outra pessoa, então use o dela. Para instalar neste aqui, use a aba Instalar.",
-    "Their iPhone runs iOS %@. From iOS 26.4 on, %@ can't use the pairing their iPhone gives over Wi-Fi. iOS 27 pairs from its own Settings instead, which works: update their iPhone, then try again and answer No when asked for its IP.":
-        "O iPhone dele está no iOS %@. A partir do iOS 26.4, o %@ não consegue usar o pareamento que o iPhone dele dá pelo Wi-Fi. O iOS 27 se pareia pelos próprios Ajustes, o que funciona: atualize o iPhone dele e tente de novo, respondendo Não quando o IP for pedido.",
-
-    // MARK: - AltStore
-
-    "couldn't reach %@: %@":
-        "não foi possível acessar %@: %@",
-    "%@ answered HTTP %d":
-        "%@ respondeu HTTP %d",
-    "%@'s list of apps couldn't be read (%@). Something on this network may have replaced it.":
-        "não foi possível ler a lista de apps de %@ (%@). Algo nesta rede pode tê-la substituído.",
-    "the %@ that arrived isn't the file %@ lists, so it isn't installed. Try again later.":
-        "o %@ que chegou não é o arquivo listado em %@, então ele não será instalado. Tente de novo mais tarde.",
-    "%@ lists no version of %@ that runs on iOS %@.":
-        "%@ não lista nenhuma versão do %@ que rode no iOS %@.",
-    "Open AltStore from your Home Screen and sign in with your Apple ID.":
-        "Abra o AltStore pela Tela de Início e entre com seu Apple ID.",
-    "To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings. Its pairing file is already in place, so the setup skips pairing.":
-        "Para instalar e renovar apps sem computador, toque em “Set up Remote AltServer” nos ajustes do AltStore. O arquivo de pareamento já está no lugar, então a configuração pula o pareamento.",
-    "To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings and follow its steps.":
-        "Para instalar e renovar apps sem computador, toque em “Set up Remote AltServer” nos ajustes do AltStore e siga os passos.",
-    "Open AltStore and sign in with the same Apple ID.":
-        "Abra o AltStore e entre com o mesmo Apple ID.",
-
-    // MARK: - Developer team
-
-    "Free · %@": "Gratuita · %@",
-    "Paid · %@": "Paga · %@",
-    "This Apple Account is on %d developer teams. Pick the one that signs.":
-        "Esta conta Apple está em %d equipes de desenvolvimento. Escolha a que assina.",
-    "Which Team?": "Qual equipe?",
-    "Signed this copy of SideInstaller": "Assinou esta cópia do SideInstaller",
-    "A free team's apps last 7 days; a paid team's last a year.":
-        "Os apps de uma equipe gratuita duram 7 dias; os de uma equipe paga, um ano.",
-    "An app installed with another team isn't replaced: signing it with this one installs a second copy.":
-        "Um app instalado com outra equipe não é substituído: assiná-lo com esta instala uma segunda cópia.",
-    "SideInstaller remembers the pick for this Apple ID. To pick again, open Settings › Account, swipe the Apple ID left and tap Team.":
-        "O SideInstaller lembra a escolha para este Apple ID. Para escolher de novo, abra Ajustes › Conta, deslize o Apple ID para a esquerda e toque em Equipe.",
-    "No developer team was picked, so the sign-in stopped.":
-        "Nenhuma equipe de desenvolvimento foi escolhida, então o login parou.",
-    "Your Apple Account is on more than one developer team. Open SideInstaller and pick the one that signs.":
-        "Sua conta Apple está em mais de uma equipe de desenvolvimento. Abra o SideInstaller e escolha a que assina.",
-    "Pick the team again?": "Escolher a equipe de novo?",
-    "Pick Again": "Escolher de novo",
-    "The next sign-in with “%@” asks which developer team signs.":
-        "O próximo login com “%@” vai perguntar qual equipe de desenvolvimento assina.",
-    // Shortcuts actions (ShortcutsSupport.swift and the *Shortcuts.swift files).
-    "%@ can't be refreshed: SideInstaller has no IPA to sign it again from. Refresh it in whatever installed it, or import its .ipa into SideInstaller first.":
-        "Não dá para renovar o %@: o SideInstaller não tem o IPA para assiná-lo de novo. Renove-o no app que o instalou, ou importe antes o .ipa dele no SideInstaller.",
-    "%@ is installed.":
-        "O %@ está instalado.",
-    "Apple is asking you to finish signing in. Continue in SideInstaller to answer it.":
-        "A Apple está pedindo para você terminar o login. Continue no SideInstaller para responder.",
-    "LocalDevVPN is connected.":
-        "O LocalDevVPN está conectado.",
-    "LocalDevVPN isn't connected. Connect it before this action runs: Shortcuts' Set VPN action can, or turn on “Start LocalDevVPN when needed” in SideInstaller's Settings.":
-        "O LocalDevVPN não está conectado. Conecte-o antes de esta ação rodar: a ação de VPN do Atalhos consegue fazer isso. Ou ative “Iniciar o LocalDevVPN quando for preciso” nos Ajustes do SideInstaller.",
-    "LocalDevVPN isn't connected. Continue in SideInstaller to connect it.":
-        "O LocalDevVPN não está conectado. Continue no SideInstaller para conectá-lo.",
-    "No route is playing.":
-        "Nenhuma rota está sendo reproduzida.",
-    "Open SideInstaller and accept its terms first.":
-        "Abra o SideInstaller e aceite os termos dele primeiro.",
-    "Pick where the route starts, or set a location first.":
-        "Escolha onde a rota começa, ou defina uma localização primeiro.",
-    "Route started: %@, about %@.":
-        "Rota iniciada: %@, cerca de %@.",
-    "That place has no coordinates. Pick it on the map, or type its address.":
-        "Esse lugar não tem coordenadas. Escolha-o no mapa ou digite o endereço.",
-    "The install didn't start. Open SideInstaller to see why.":
-        "A instalação não começou. Abra o SideInstaller para ver o motivo.",
-
-    // MARK: - Sources
-
-    "Suggested":
-        "Sugeridas",
-
-    "Paste the link of a SideStore or AltStore source, or of a .json source file. Its apps, their updates and release notes show here.":
-        "Cole o link de uma fonte do SideStore ou AltStore, ou de um arquivo de fonte .json. Os apps, as atualizações e as notas de versão aparecem aqui.",
-
-    "Sources":
-        "Fontes",
-    "Add a source":
-        "Adicionar uma fonte",
-    "Add":
-        "Adicionar",
-    "Apps":
-        "Apps",
-    "Updates":
-        "Atualizações",
-    "Update":
-        "Atualizar",
-    "Your sources":
-        "Suas fontes",
-    "Check for updates":
-        "Verificar atualizações",
-    "Copy link":
-        "Copiar link",
-    "Source options":
-        "Opções da fonte",
-    "Loading…":
-        "Carregando…",
-    "What's new":
-        "Novidades",
-    "Version history":
-        "Histórico de versões",
-    "This version has no release notes.":
-        "Esta versão não tem notas de versão.",
-    "%d update":
-        "%d atualização",
-    "%d updates":
-        "%d atualizações",
-    "%d source":
-        "%d fonte",
-    "%d sources":
-        "%d fontes",
-    "Update to %@":
-        "Atualizar para %@",
-    "Install %@ %@?":
-        "Instalar %@ %@?",
-    "Version %@ · from %@":
-        "Versão %@ · de %@",
-    "%@ installed · %@ available":
-        "%@ instalada · %@ disponível",
-    "%@ installed · up to date":
-        "%@ instalada · atualizada",
-    "That source is already added.":
-        "Essa fonte já foi adicionada.",
-    "The source answered with HTTP %d.":
-        "A fonte respondeu com HTTP %d.",
-    "Couldn't reach the source: %@":
-        "Não foi possível acessar a fonte: %@",
-    "That isn't a source link. Paste the whole https:// address of the source.":
-        "Isso não é um link de fonte. Cole o endereço https:// completo da fonte.",
-    "That link didn't return a source. It has to be the source's JSON file itself.":
-        "Esse link não retornou uma fonte. Ele precisa ser o próprio arquivo JSON da fonte.",
-    "Downloads the IPA from the source, then signs it with your Apple ID and installs it, as a custom .ipa would be.":
-        "Baixa o IPA da fonte, depois o assina com seu Apple ID e o instala, como um .ipa personalizado.",
-    "This version is older than the newest one. It's installed over the copy on this iPhone, which may not open data a newer version saved.":
-        "Esta versão é mais antiga que a mais recente. Ela é instalada sobre a cópia deste iPhone, que pode não abrir dados salvos por uma versão mais nova.",
-    "This version is older than the one on this iPhone (%@). Installed over it, it may not open data the newer version saved.":
-        "Esta versão é mais antiga que a deste iPhone (%@). Instalada por cima, ela pode não abrir dados salvos pela versão mais nova.",
-
-    // MARK: - JIT
-
-    "%@ has the JIT memory it asked for, so SideInstaller let go of it. JIT stays on until it quits.":
-        "%@ já tem a memória JIT que pediu, então o SideInstaller o soltou. O JIT fica ativo até o app fechar.",
-    "%@ of JIT memory prepared": "%@ de memória JIT preparada",
-    "%d app can use JIT": "%d app pode usar JIT",
-    "%d apps can use JIT": "%d apps podem usar JIT",
-    "Attach and detach": "Anexar e desanexar",
-    "Attaching the debugger": "Anexando o depurador",
-    "Auto: %@": "Automático: %@",
-    "Connecting to this iPhone's debugger": "Conectando ao depurador deste iPhone",
-    "Couldn't open %@ under the debugger: %@": "Não foi possível abrir %@ com o depurador: %@",
-    "Couldn't reach the debugger on this iPhone: %@":
-        "Não foi possível acessar o depurador deste iPhone: %@",
-    "Enable JIT": "Ativar JIT",
-    "JIT is on for %@ until it quits.": "O JIT está ativo para %@ até ele fechar.",
-    "JIT is on. SideInstaller stays attached while %@ runs: keep SideInstaller in the background, since closing it ends JIT.":
-        "O JIT está ativo. O SideInstaller fica anexado enquanto %@ roda: deixe o SideInstaller em segundo plano, porque fechá-lo encerra o JIT.",
-    "JIT needs Developer Mode. Turn it on under Settings › Privacy & Security › Developer Mode, and confirm it after the restart.":
-        "O JIT precisa do Modo de Desenvolvedor. Ative-o em Ajustes › Privacidade e Segurança › Modo de Desenvolvedor e confirme depois de reiniciar.",
-    "JIT on for %@": "JIT ativo para %@",
-    "Legacy": "Legado",
-    "No app on this iPhone is signed for development, which a debugger needs. Install the app with SideStore or SideInstaller, which sign apps that way, then load the apps again.":
-        "Nenhum app neste iPhone está assinado para desenvolvimento, que é o que um depurador precisa. Instale o app com o SideStore ou o SideInstaller, que assinam os apps assim, e carregue os apps de novo.",
-    "No apps can use JIT": "Nenhum app pode usar JIT",
-    "Opening %@": "Abrindo %@",
-    "Quit %@": "Fechar %@",
-    "The debugger couldn't attach to %@ (%@). Install it again with SideStore or SideInstaller, which sign apps so a debugger can attach.":
-        "O depurador não conseguiu se anexar a %@ (%@). Instale-o de novo com o SideStore ou o SideInstaller, que assinam os apps para que um depurador possa se anexar.",
-    "The debugger lost %@ (%@). Open it with JIT again.":
-        "O depurador perdeu %@ (%@). Abra-o com JIT de novo.",
-    "Universal": "Universal",
 ]

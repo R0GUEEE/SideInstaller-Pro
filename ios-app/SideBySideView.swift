@@ -1,163 +1,54 @@
 import SwiftUI
-import UIKit
-import UniformTypeIdentifiers
 import SideInstallerFFI
-
-// MARK: - What goes on their iPhone
-
-/// What Side by Side can put on another iPhone, the choice iLoader offers:
-/// SideInstaller itself, one of the two SideStore builds the Install tab sets
-/// up, AltStore, or an IPA picked from Files.
-enum SideBySideApp: String, CaseIterable, Identifiable {
-    case sideInstaller
-    case sideStore
-    case liveContainer
-    case altStore
-    /// An IPA picked from Files (`SideBySideManager.customIPA`). One of the
-    /// four above is set up like that build; any other app is signed and
-    /// installed as it is, without a pairing file.
-    case custom
-
-    var id: String { rawValue }
-
-    /// The choices with a card of their own; `.custom` is picked from the
-    /// text under Continue.
-    static let builtIn: [SideBySideApp] = [.sideInstaller, .sideStore, .liveContainer, .altStore]
-
-    /// The Install tab's build, for the two SideStore builds and AltStore:
-    /// downloaded from the same place, and handed the pairing file the same
-    /// way. Nil for SideInstaller, which comes from its own latest release and
-    /// is handed the pairing file as an imported one, and for a custom IPA.
-    var source: InstallSource? {
-        switch self {
-        case .sideInstaller: return nil
-        case .sideStore:     return .sideStore
-        case .liveContainer: return .liveContainer
-        case .altStore:      return .altStore
-        case .custom:        return nil
-        }
-    }
-
-    /// Full name, for titles and the log.
-    var displayName: String {
-        switch self {
-        case .sideInstaller: return "SideInstaller"
-        case .custom:        return L("Custom .ipa")
-        default:             return source?.displayName ?? "SideInstaller"
-        }
-    }
-
-    /// What it's called on their Home Screen.
-    var homeScreenName: String {
-        switch self {
-        case .sideInstaller: return "SideInstaller"
-        case .custom:        return L("Custom .ipa")
-        default:             return source?.pairingAppDisplayName ?? "SideInstaller"
-        }
-    }
-
-    /// What their iPhone needs for it. Each of SideInstaller's own works
-    /// through LocalDevVPN with the pairing file this iPhone hands it, on any
-    /// iOS that pairing works on.
-    var requirement: String {
-        L("Needs LocalDevVPN on their iPhone")
-    }
-
-    var requirementSymbol: String { "network" }
-
-    /// The app's own icon: SideInstaller's, and the official SideStore,
-    /// LiveContainer and AltStore icons from their repositories (AGPL-3.0),
-    /// at 256 px.
-    var image: String? {
-        switch self {
-        case .sideInstaller: return "AppLogo"
-        case .sideStore:     return "SideStoreLogo"
-        case .liveContainer: return "LiveContainerLogo"
-        case .altStore:      return "AltStoreLogo"
-        case .custom:        return nil
-        }
-    }
-
-    /// SF Symbol drawn on `tint` if the icon art is missing.
-    var symbol: String {
-        switch self {
-        case .sideInstaller: return "arrow.down.app"
-        case .sideStore:     return "storefront"
-        case .liveContainer: return "shippingbox"
-        case .altStore:      return "diamond"
-        case .custom:        return "app.dashed"
-        }
-    }
-}
 
 // MARK: - Steps
 
 /// Steps of a Side by Side install, in run order.
 ///
-/// Fewer than the Install tab's `Step`: the link goes straight over Wi-Fi (no
-/// VPN), and their iPhone is paired as it opens. `setUp` hands the installed
-/// app the pairing file, so it connects with it from the first launch.
+/// Fewer than the Install tab's `Step`: the tunnel goes directly over Wi-Fi (no
+/// VPN), and no pairing file is written afterwards since SideInstaller pairs
+/// itself.
 enum SideBySideStep: Int, CaseIterable, Identifiable {
-    case connect, signIn, download, sign, install, setUp
+    case connect, signIn, download, sign, install
 
     var id: Int { rawValue }
 
-    func title(for app: SideBySideApp) -> String {
+    var title: String {
         switch self {
         case .connect:  return L("Pair with their iPhone")
-        case .signIn:   return L("Sign in to Apple ID")
-        case .download: return app == .custom ? L("Use your imported IPA") : L("Download %@", app.displayName)
+        case .signIn:   return L("Sign in to their Apple ID")
+        case .download: return L("Download SideInstaller")
         case .sign:     return L("Sign the app")
         case .install:  return L("Install on their iPhone")
-        case .setUp:    return L("Finish setup")
         }
-    }
-
-    /// The steps a run goes through: all of them, unless the app it installs
-    /// gets no pairing file (`setsUp` false), which leaves out the last.
-    static func steps(setsUp: Bool) -> [SideBySideStep] {
-        setsUp ? allCases : allCases.filter { $0 != .setUp }
     }
 }
 
 // MARK: - Manager
 
-/// Installs SideInstaller, SideStore, LiveContainer + SideStore or an IPA
-/// picked from Files onto *another* iPhone on the same Wi-Fi network, one page
-/// at a time.
+/// Installs SideInstaller onto *another* iPhone on the same Wi-Fi network.
 ///
-/// The pages (`Stage`) gather what to install, their address if they have it,
-/// and the Apple ID, then have their iPhone made ready before the run starts.
-/// The run is the Install tab's flow over the LAN:
+/// Same flow as the Install tab, but over the LAN:
 ///
-/// 1. **Pair.** With their address, a record saved by an earlier attempt goes
-///    first. Otherwise run the lockdown `Pair` handshake directly against
+/// 1. **Pair.** With an IP address typed in, a record saved by an earlier run
+///    goes first. Otherwise run the lockdown `Pair` handshake directly against
 ///    `<their IP>:62078`: their iPhone shows a Trust prompt and returns a
 ///    lockdown pair record, which CoreDeviceProxy (`tunnel_create_usb`) uses to
-///    open the tunnel. iOS 27's lockdownd won't pair over Wi-Fi (it resets the
-///    connection at the first request, before any Trust prompt), so when
+///    open the tunnel. iOS 27's lockdownd won't pair over Wi-Fi — it resets the
+///    connection at the first request, before any Trust prompt — so when
 ///    lockdownd answers but won't pair, their iPhone pairs from its own
 ///    Settings instead (Remote Pairing): this iPhone advertises a pairing host,
 ///    they pick it under Developer Mode and type the code shown here, and the
 ///    RPPairing file that produces opens the tunnel
-///    (`tunnel_create_rppairing`). Without their address the run goes straight
-///    to Remote Pairing, and their iPhone is reached at the address it
-///    connected from; a retry then tries the record saved for that address.
-/// 2. **Sign in, download, sign, install** as in the one-click flow, using the
-///    Apple ID picked here and the target's UDID. The SideStore builds come
-///    from the same releases as on the Install tab.
-/// 3. **Set up**: the pair record goes into the app on their iPhone, as the
-///    Install tab hands this iPhone's to SideStore, so it opens ready to use.
-///    SideInstaller gets it as an imported pairing file, which works below
-///    iOS 27 too. Each pairing has an identity of its own on their iPhone, so
-///    a later Side by Side pairing can't replace the record an app holds.
+///    (`tunnel_create_rppairing`). With no address typed in, the run goes
+///    straight to Remote Pairing, and their iPhone is reached at the address
+///    it connected from.
+/// 2. **Sign in, sign, install** as in the one-click flow, using the credentials
+///    entered on this page and the target's UDID.
 ///
 /// Credentials are kept in memory only, never saved to `AccountStore` or the
-/// keychain. Someone else's Apple ID signs in from a temporary folder, where
-/// isideload keeps its signing key and anisette identity. That folder, the
-/// Apple ID session and the pair records with their iPhone are forgotten once
-/// the app is set up on it, or on Clear: from then on only what was handed to
-/// the app on their iPhone holds them.
+/// keychain. Pair records with their iPhone are forgotten once the app is on
+/// it, or on Clear.
 final class SideBySideManager: ObservableObject {
 
     /// Unsigned IPA from SideInstaller's latest GitHub release.
@@ -167,114 +58,23 @@ final class SideBySideManager: ObservableObject {
     /// What the release asset is called, and what the download is saved as.
     static let ipaFileName = "SideInstaller.ipa"
 
-    // MARK: Pages
+    // MARK: Inputs
 
-    /// The page showing: a welcome, four numbered setup steps, then the run
-    /// and how it ended.
-    enum Stage: Int, Comparable {
-        case welcome, app, address, account, ready, run
-
-        static func < (lhs: Stage, rhs: Stage) -> Bool { lhs.rawValue < rhs.rawValue }
-
-        /// How many numbered steps the setup has before the run.
-        static let numberedCount = 4
-
-        /// The setup step's number, 1 to 4; nil for the welcome and the run.
-        var number: Int? {
-            (1...Self.numberedCount).contains(rawValue) ? rawValue : nil
-        }
-
-        /// The page Back leads to.
-        var previous: Stage? {
-            switch self {
-            case .welcome: return nil
-            case .app:     return .welcome
-            case .address: return .app
-            case .account: return .address
-            case .ready:   return .account
-            case .run:     return .ready
-            }
-        }
-    }
-
-    @Published private(set) var stage: Stage = .welcome
-    /// True when the latest move was forward, so pages slide the right way.
-    @Published private(set) var movingForward = true
-
-    // MARK: Choices
-
-    /// What to install. Remembered, as it's usually the same each time.
-    @Published var app: SideBySideApp = SideBySideManager.savedApp {
-        didSet { UserDefaults.standard.set(app.rawValue, forKey: Self.appKey) }
-    }
-    /// Which release of a SideStore build, as on the Install tab.
-    @Published var channel: ReleaseChannel = .stable
-    /// Yes on the address page: they have their iPhone's IP address. Optional,
-    /// as their iPhone can pair from its Settings instead, on iOS 27.
-    @Published var knowsAddress = false
-    /// Their iPhone's address on this Wi-Fi network, when `knowsAddress`. Set
-    /// to the address it was reached at once it pairs, so a retry finds the
-    /// record saved for it.
+    /// The other iPhone's address on this Wi-Fi network. Optional: pairing from
+    /// their Settings reports it, and fills it in so a retry finds the record.
     @Published var targetIP = ""
-    /// Sign with the Apple ID saved on this iPhone instead of one typed in.
-    @Published var usesSavedAccount = false
     /// The Apple ID the app is signed with. Never persisted — see the note above.
     @Published var appleID = ""
     @Published var password = ""
 
-    /// An IPA picked for `SideBySideApp.custom`: this page's own copy, in a
-    /// temporary folder of its own, and what it holds.
-    struct CustomIPA: Equatable {
-        let file: URL
-        /// Its Home Screen name, or the file's name when its Info.plist can't
-        /// be read.
-        let name: String
-        let version: String?
-        /// The build of SideInstaller's own it is, set up just like that build;
-        /// nil for any other app, which gets no pairing file.
-        let build: SideBySideApp?
-    }
-
-    /// The IPA picked for `.custom`. Kept until another is picked or
-    /// SideInstaller closes, like the choice of app; Clear keeps it too.
-    @Published private(set) var customIPA: CustomIPA?
-    @Published private(set) var isImportingIPA = false
-    /// Why the last pick didn't take.
-    @Published private(set) var importError: String?
-
-    /// SideInstaller's bundle ID as released, which tells a picked IPA of it
-    /// apart; a build signed earlier has `.<team ID>` after it.
-    static let sideInstallerBundleID = "com.frizzlem.sideinstaller"
-
-    private static let appKey = "sideBySideApp"
-    private static var savedApp: SideBySideApp {
-        // Not `.custom`: the IPA picked for it goes when SideInstaller closes.
-        UserDefaults.standard.string(forKey: appKey).flatMap(SideBySideApp.init(rawValue:))
-            .flatMap { $0 == .custom ? nil : $0 } ?? .sideInstaller
-    }
-
-    // MARK: Run state
+    // MARK: State
 
     @Published private(set) var stepStates: [SideBySideStep: StepState] = Dictionary(
         uniqueKeysWithValues: SideBySideStep.allCases.map { ($0, .pending) })
     @Published private(set) var isRunning = false
-    /// True from a cancel until the run stops, which waits for the step in
-    /// flight to reach a safe point.
-    @Published private(set) var isCancelling = false
     @Published private(set) var finished = false
-    /// What the current or last run installs, as it was when it started.
-    @Published private(set) var runApp: SideBySideApp = .sideInstaller
-    /// Its name: the picked IPA's for `.custom`.
-    @Published private(set) var runName = "SideInstaller"
-    /// The build the run sets up, which gets the pairing file: `runApp`, or
-    /// the one a picked IPA is. Nil for any other app.
-    @Published private(set) var runSetsUp: SideBySideApp? = .sideInstaller
-    /// The steps the run goes through.
-    @Published private(set) var runSteps = SideBySideStep.steps(setsUp: true)
     /// The far device's name and iOS version, once the link is open.
     @Published private(set) var targetSummary: String?
-    /// Their iPhone's iOS version ("27.1"), once the link is open.
-    @Published private(set) var targetOSVersion: String?
     /// How much of the download has arrived (0…1), while that step is running.
     @Published private(set) var downloadProgress: Double = 0
     /// Home-screen name of what landed on their iPhone.
@@ -284,18 +84,9 @@ final class SideBySideManager: ObservableObject {
     @Published private(set) var pairingInSettings = false
     /// The code to type into their iPhone, once it has asked for one.
     @Published private(set) var pairingPIN: String?
-    /// True while their iPhone shows a Trust prompt that has been up a moment.
-    @Published private(set) var waitingForTrust = false
-    /// Their iOS version, when SideInstaller went onto an iPhone that can't
-    /// use the pairing it gave, so none was handed over: a lockdown record on
-    /// iOS 26.4 or later. It then needs a pairing file made on a computer.
-    @Published private(set) var pairingLeftOutOn: String?
-    /// True when AltStore went on without the pairing, which it can't connect
-    /// with as a lockdown record only: it pairs as its Remote AltServer is set
-    /// up instead.
-    @Published private(set) var altStorePairsItself = false
-    /// Why the run stopped, or couldn't start.
-    @Published private(set) var lastError: String?
+    @Published var lastError: String?
+    /// True from a finished run until its popup is closed.
+    @Published private(set) var showsSuccess = false
     /// True while a pair record with someone else's iPhone is saved here.
     @Published private(set) var remembersTheirIPhone = PrivateStore.hasPeerPairings
 
@@ -308,134 +99,34 @@ final class SideBySideManager: ObservableObject {
     private let signQueue = DispatchQueue(label: "sideinstaller.sidebyside.sign")
 
     private var signSession: OpaquePointer?          // SignSession*
-    /// The Apple ID `signSession` belongs to, so another one signs out.
+    /// The Apple ID `signSession` belongs to, so editing the field signs out.
     private var signedInAs: String?
-    /// The temporary folder someone else's Apple ID signs in from, which holds
-    /// its signing key once the app is signed. Nil for an Apple ID saved on
-    /// this iPhone, which signs in from `PrivateStore.isideload`.
-    private var temporarySignIn: TemporarySignIn?
-    /// The address their iPhone was reached at, kept so a retry finds the
-    /// record saved for it. Main thread only.
-    private var pairedAddress: String?
     /// Where the pair record for the current target lives: a lockdown record,
     /// or an RPPairing file from Remote Pairing.
     private var pairRecordPath: String?
-    /// The downloaded IPA, kept between runs so a retry doesn't fetch it again.
+    /// The downloaded IPA, kept between runs so a retry after a signing failure
+    /// doesn't fetch it again. Its staging directory is ours to delete.
     private var downloadedIPA: URL?
-    /// Which build `downloadedIPA` is, so only a retry for the same one skips
-    /// the download.
-    private var downloadedKey: String?
-    /// True when `downloadedIPA` is this page's own copy, whose staging folder
-    /// is ours to delete; a SideStore build lives in Documents, shared with the
-    /// Install tab, and stays.
-    private var ownsDownload = false
     private var signedAppPath: String?
-    private var signedBundleID: String?
     private var targetUDID: String?
     private var targetName: String?
     /// True once the Local Network prompt has been raised, so it asks once.
     private var askedLocalNetwork = false
-    /// Counts Trust waits, so a delayed "show" for one that has ended does
-    /// nothing. Main thread only.
-    private var trustWaits = 0
 
     private var engine: Engine { Engine.shared }
 
-    private struct TemporarySignIn {
-        let appleID: String
-        let folder: URL
-    }
-
-    init() {
-        // Left with someone's signing key in it if SideInstaller was closed
-        // before a run ended.
-        PrivateStore.forgetEarlierPeerSignIns()
-        // IPAs picked before SideInstaller last closed.
-        try? FileManager.default.removeItem(at: Self.customIPAFolder)
-    }
-
     deinit {
         if let signSession { si_sign_session_free(signSession) }
-        if let folder = temporarySignIn?.folder { try? FileManager.default.removeItem(at: folder) }
         connection.disconnect()
         discardDownload()
-        try? FileManager.default.removeItem(at: Self.customIPAFolder)
-    }
-
-    // MARK: - Moving between pages
-
-    /// Shows `next`. The direction is published a beat before the page
-    /// changes, so the page leaving is drawn with it and slides the right way.
-    @MainActor
-    func go(to next: Stage) {
-        guard next != stage else { return }
-        let forward = next > stage
-        guard forward != movingForward else {
-            stage = next
-            return
-        }
-        movingForward = forward
-        DispatchQueue.main.async { self.stage = next }
-    }
-
-    /// One page back; nothing while a run goes.
-    @MainActor
-    func goBack() {
-        guard !isRunning, let previous = stage.previous else { return }
-        if stage == .run { lastError = nil }
-        go(to: previous)
-    }
-
-    /// From a stopped run back to the summary, to change what it uses.
-    @MainActor
-    func editDetails() {
-        guard !isRunning else { return }
-        lastError = nil
-        go(to: .ready)
-    }
-
-    /// From a finished run back to the choice of app, for another one on the
-    /// same iPhone. The Apple ID and password stay, but the finished run forgot
-    /// the pairing and signed out, so the next one pairs and signs in again.
-    /// Someone else's Apple ID gets a new temporary folder: Apple may ask their
-    /// iPhone for a code again, and a new certificate is made.
-    @MainActor
-    func installAnother() {
-        guard !isRunning else { return }
-        resetRun()
-        go(to: .app)
-    }
-
-    /// Ends with a finished run: clears their details and goes back to the
-    /// start.
-    @MainActor
-    func finishAndReset() {
-        guard !isRunning else { return }
-        clear()
-        go(to: .welcome)
     }
 
     // MARK: - Derived
 
-    /// The address typed in, when they said they have it; nil otherwise, and
-    /// the run pairs from their Settings.
-    var typedAddress: String? {
-        let ip = Self.tidy(targetIP)
-        return knowsAddress && !ip.isEmpty ? ip : nil
-    }
-
-    /// What's wrong with the address typed in; nil when it's usable, or when
-    /// there's none to check.
-    var addressProblem: String? {
-        guard let ip = typedAddress else { return nil }
-        guard Self.isIPv4(ip) else {
-            return L("“%@” isn't an IPv4 address. It should look like 192.168.1.42.", ip)
-        }
-        // Pointed at this iPhone, the whole run would talk to itself.
-        guard !NetworkStatus.isOwnAddress(ip) else {
-            return L("%@ is an address this iPhone already holds. Side by Side installs onto someone else's iPhone, so use theirs. To install on this one, use the Install tab.", ip)
-        }
-        return nil
+    /// True when there is enough on the page to start a run. The address is
+    /// optional; see `targetIP`.
+    var canRun: Bool {
+        !Self.tidy(appleID).isEmpty && !password.isEmpty
     }
 
     /// This iPhone's Wi-Fi address, shown as an example of what theirs looks like.
@@ -443,146 +134,146 @@ final class SideBySideManager: ObservableObject {
         NetworkStatus.interfaces().first { $0.name == "en0" }?.ipv4
     }
 
-    /// True when the Apple ID saved on this iPhone is the one picked, and
-    /// there still is one.
-    var signsWithSavedAccount: Bool {
-        usesSavedAccount && AccountStore.shared.active != nil
-    }
-
-    /// The Apple ID and password the run signs with; nil until there are both.
-    var credentials: (id: String, password: String)? {
-        if signsWithSavedAccount {
-            let store = AccountStore.shared
-            let id = store.activeAppleID, pw = store.activePassword
-            return id.isEmpty || pw.isEmpty ? nil : (id, pw)
-        }
-        let id = Self.tidy(appleID)
-        return id.isEmpty || password.isEmpty ? nil : (id, password)
-    }
-
-    var hasCredentials: Bool { credentials != nil }
-
-    /// Fraction across the run's steps, for the progress bar. The download and
-    /// install steps also fill their own share as they go.
+    /// Fraction across all five steps, for the progress bar.
     var overallProgress: Double {
-        let steps = runSteps
-        let done = Double(steps.filter { stepStates[$0] == .done }.count)
-        var partial = 0.0
-        if stepStates[.download] == .active { partial = downloadProgress }
-        if stepStates[.install] == .active { partial = engine.installProgress }
-        return min(1, (done + partial) / Double(steps.count))
+        let total = Double(SideBySideStep.allCases.count)
+        let done = Double(SideBySideStep.allCases.filter { stepStates[$0] == .done }.count)
+        let partial = stepStates[.download] == .active ? downloadProgress : 0
+        return min(1, (done + partial) / total)
+    }
+
+    // MARK: - Popups
+
+    /// One of this page's popups; they stack in this order. Each carries what
+    /// it shows, so it keeps its content while it closes.
+    enum Popup: Hashable {
+        /// The code their iPhone asks for while it pairs.
+        case pairingCode(String)
+        /// How to pair from their iPhone's Settings.
+        case pairInSettings
+        case error(String)
+        /// The app is on their iPhone, named.
+        case success(String)
+    }
+
+    /// True while the run waits for their iPhone to pair from its Settings,
+    /// whose steps and code it can't go on without.
+    var isWaitingOnUser: Bool {
+        isRunning && (pairingInSettings || pairingPIN != nil)
+    }
+
+    /// The popups up now, top to bottom.
+    var popups: [Popup] {
+        var shown: [Popup] = []
+        if let pairingPIN { shown.append(.pairingCode(pairingPIN)) }
+        if pairingInSettings { shown.append(.pairInSettings) }
+        if let lastError { shown.append(.error(lastError)) }
+        if showsSuccess { shown.append(.success(installedAppName ?? "SideInstaller")) }
+        return shown
+    }
+
+    /// True for a popup the run is waiting on: closing it stops the run.
+    func blocks(_ popup: Popup) -> Bool {
+        switch popup {
+        case .pairingCode, .pairInSettings: return isWaitingOnUser
+        case .error, .success:              return false
+        }
+    }
+
+    /// Closes one popup. The run can't go on without the pairing steps or the
+    /// code, so closing either stops it, and both go.
+    @MainActor
+    func closePopup(_ popup: Popup) {
+        if blocks(popup) {
+            cancel()
+            // Gone now, not once the cancelled wait has unwound.
+            pairingInSettings = false
+            pairingPIN = nil
+            return
+        }
+        switch popup {
+        case .error:          lastError = nil
+        case .success:        showsSuccess = false
+        // The steps hang under the code and close with it.
+        case .pairingCode:    pairingPIN = nil; pairingInSettings = false
+        case .pairInSettings: pairingInSettings = false
+        }
     }
 
     // MARK: - The run
 
-    /// Starts the run from the summary, or again after it stopped. Checks what
-    /// it can first, and says why it can't start instead of starting.
     @MainActor
-    func start() {
+    func run() {
         guard !isRunning else { return }
-        if let problem = addressProblem {
-            lastError = ErrorHelp.explained(problem)
-            return
-        }
-        guard let credentials else {
-            lastError = ErrorHelp.explained(L("Enter the Apple ID to sign with, and its password."))
-            return
-        }
-        if app == .custom {
-            // iOS may clear the temporary folder it was copied into.
-            guard let picked = customIPA, FileManager.default.fileExists(atPath: picked.file.path) else {
-                if customIPA != nil { discardCustomIPA() }
-                lastError = ErrorHelp.explained(L("Pick an .ipa to install."))
+        let typed = Self.tidy(targetIP)
+        let ip = typed.isEmpty ? nil : typed
+        let id = Self.tidy(appleID)
+        let pw = password
+
+        if let ip {
+            guard Self.isIPv4(ip) else {
+                lastError = ErrorHelp.explained(L("“%@” isn't an IPv4 address. It should look like 192.168.1.42.", ip))
                 return
             }
+            // Pointed at this iPhone, the whole run would talk to itself.
+            guard !NetworkStatus.isOwnAddress(ip) else {
+                lastError = ErrorHelp.explained(L("%@ is an address this iPhone already holds. Side by Side installs onto someone else's iPhone — use theirs. To install on this one, use the Install tab.", ip))
+                return
+            }
+        }
+        guard !id.isEmpty, !pw.isEmpty else {
+            lastError = ErrorHelp.explained(L("Enter the Apple ID to sign with, and its password."))
+            return
         }
         engine.refreshNetworkStatus()
         guard engine.wifiConnected else {
             lastError = ErrorHelp.explained(L("Wi-Fi is off. Both iPhones have to be on the same Wi-Fi network for this to work."))
             return
         }
+
         // A different Apple ID than the session was opened with invalidates it.
-        if let signedInAs, signedInAs.caseInsensitiveCompare(credentials.id) != .orderedSame {
+        if let signedInAs, signedInAs.caseInsensitiveCompare(id) != .orderedSame {
             signOut()
         }
 
-        let app = self.app
-        // AltStore has a stable channel only, whatever was picked for another.
-        let offered = app.source?.channels(stableReleased: true) ?? ReleaseChannel.allCases
-        let channel = offered.contains(self.channel) ? self.channel : offered[0]
-        let custom = app == .custom ? customIPA : nil
-        let setsUp: SideBySideApp? = custom != nil ? custom?.build : app
-        resetRun()
-        runApp = app
-        runName = custom?.name ?? app.displayName
-        runSetsUp = setsUp
-        runSteps = SideBySideStep.steps(setsUp: setsUp != nil)
+        reset()
         isRunning = true
-        // Their iPhone has the user's attention while it pairs, and a locked
-        // screen would stop the run, with the code on it.
-        UIApplication.shared.isIdleTimerDisabled = true
-        go(to: .run)
-        let build: String
-        if let custom {
-            build = "\(custom.name) from \(custom.file.lastPathComponent)"
-                + (custom.build.map { ", set up as \($0.displayName)" } ?? ", with no pairing file")
-        } else {
-            build = app.source == nil ? app.displayName : "\(channel.displayName) \(app.displayName)"
-        }
-        let target = (typedAddress ?? pairedAddress).map { "their iPhone at \($0)" }
-            ?? "the iPhone that pairs from its Settings"
-        engine.log("=== Side by Side: installing \(build) onto \(target) ===")
+        engine.log("=== Side by Side: installing onto \(ip ?? "the iPhone that pairs from its Settings") ===")
 
         task = Task { @MainActor in
             do {
                 await ensureLocalNetwork()
-                let address = try await connectToTarget(app: app)
-                if let setsUp { try checkCompatibility(of: setsUp) }
-                try await signIn(id: credentials.id, pw: credentials.password)
-                try await download(app, channel: channel, custom: custom)
-                try await signApp(app)
+                let address = try await connectToTarget(typedIP: ip)
+                try await signIn(id: id, pw: pw)
+                try await download()
+                try await signApp()
                 try await install(ip: address)
-                if let setsUp { try await setUp(setsUp, ip: address, appleID: credentials.id) }
                 finishSuccess()
-            } catch let error where error is CancellationError || Task.isCancelled {
-                // A blocking call that was under way when Cancel was tapped can
-                // still end in its own error; the run was cancelled all the same.
-                engine.log("Side by Side: cancelled\(error is CancellationError ? "" : " (\(short(error)))").")
-                // Back to the summary it started from, as if it hadn't run.
-                for step in SideBySideStep.allCases { stepStates[step] = .pending }
-                downloadProgress = 0
-                go(to: .ready)
+            } catch is CancellationError {
+                engine.log("Side by Side: cancelled.")
+                failActiveStep(to: .pending)
             } catch {
                 let message = short(error)
                 lastError = message
                 engine.log("⛔️ Side by Side stopped: \(message)")
                 failActiveStep(to: .failed)
             }
-            pairingInSettings = false
-            pairingPIN = nil
-            setTrustWait(false)
             remembersTheirIPhone = PrivateStore.hasPeerPairings
             isRunning = false
-            isCancelling = false
-            UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
     /// Cancels the run at the next step boundary. Blocking FFI calls (e.g.
-    /// opening the tunnel) can't be interrupted, so it takes effect once
+    /// waiting on the Trust prompt) can't be interrupted, so it takes effect once
     /// the current call returns. Waiting for them to pair from Settings stops
     /// straight away.
     @MainActor
     func cancel() {
-        guard isRunning, !isCancelling else { return }
-        isCancelling = true
         task?.cancel()
     }
 
-    /// Frees the Apple ID session so the next run signs in again, and deletes
-    /// the temporary folder someone else's Apple ID signed in from. Called when
-    /// the Apple ID changes, once the app is set up on their iPhone, and by
-    /// Clear, so another person's session and signing key aren't kept.
+    /// Frees the Apple ID session so the next run signs in again. Called when
+    /// the Apple ID changes and by Clear, so another person's session isn't kept.
     ///
     /// Not main-actor isolated: the work runs on `signQueue`, and the session
     /// pointer isn't `Sendable`.
@@ -595,27 +286,6 @@ final class SideBySideManager: ObservableObject {
             si_sign_session_free(session)
             self.signSession = nil
         }
-        // The key was made for this session, and a later one would make
-        // another.
-        discardTemporarySignIn()
-    }
-
-    /// Deletes the temporary sign-in folder, signing key included. Queued on
-    /// `signQueue`, so whatever is still signing with it finishes first.
-    private func discardTemporarySignIn() {
-        guard let signIn = temporarySignIn else { return }
-        temporarySignIn = nil
-        let who = LogRedactor.maskAppleID(signIn.appleID)
-        signQueue.async {
-            do {
-                try FileManager.default.removeItem(at: signIn.folder)
-                Engine.shared.log("Side by Side: deleted the temporary folder \(who) signed in from, with its signing key and anisette identity.")
-            } catch let error as CocoaError where error.code == .fileNoSuchFile {
-                // Already gone.
-            } catch {
-                Engine.shared.log("⚠️ Side by Side: couldn't delete the temporary folder \(who) signed in from (\(error.localizedDescription)). SideInstaller deletes it the next time it opens.")
-            }
-        }
     }
 
     /// Closes the link to their iPhone and deletes every pair record saved with
@@ -626,7 +296,6 @@ final class SideBySideManager: ObservableObject {
         disconnectTheirIPhone()
         PrivateStore.forgetPeerPairings()
         pairRecordPath = nil
-        pairedAddress = nil
         targetIP = ""
         remembersTheirIPhone = false
     }
@@ -640,8 +309,7 @@ final class SideBySideManager: ObservableObject {
         deviceQueue.async { [weak self] in self?.connection.disconnect() }
     }
 
-    /// Clears their details: credentials, pairings and the download. What to
-    /// install is kept.
+    /// Clear the page back to how it opened, credentials and pairings included.
     @MainActor
     func clear() {
         guard !isRunning else { return }
@@ -649,30 +317,24 @@ final class SideBySideManager: ObservableObject {
         forgetTheirIPhone()
         discardDownload()
         signedAppPath = nil
-        signedBundleID = nil
         targetUDID = nil
         targetName = nil
+        targetSummary = nil
+        installedAppName = nil
         appleID = ""
         password = ""
-        usesSavedAccount = false
-        knowsAddress = false
-        resetRun()
+        reset()
     }
 
     @MainActor
-    private func resetRun() {
+    private func reset() {
         for step in SideBySideStep.allCases { stepStates[step] = .pending }
         downloadProgress = 0
         lastError = nil
         finished = false
+        showsSuccess = false
         pairingInSettings = false
         pairingPIN = nil
-        setTrustWait(false)
-        pairingLeftOutOn = nil
-        altStorePairsItself = false
-        targetSummary = nil
-        targetOSVersion = nil
-        installedAppName = nil
     }
 
     @MainActor
@@ -691,107 +353,12 @@ final class SideBySideManager: ObservableObject {
     @MainActor
     private func finishSuccess() {
         finished = true
-        let name = installedAppName ?? runName
-        engine.log("✅ Side by Side done: \(name) is on their iPhone. One trust step left, on their side.")
-        // Theirs pairs itself and signs itself in, or SideStore now holds the
-        // record and signs in itself: this iPhone has no more use for the
-        // pairing, their Apple ID session or their signing key. Nothing reads
-        // the key after `setUp`, which builds SideStore's certificate from it.
-        signOut()
+        showsSuccess = true
+        let name = installedAppName ?? "SideInstaller"
+        engine.log("✅ Side by Side done — \(name) is on their iPhone. One trust step left, on their side.")
+        // It pairs itself from there, so this iPhone has no more use for theirs.
         forgetTheirIPhone()
-        engine.log("Side by Side: signed out and forgot the pairing with their iPhone.")
-    }
-
-    // MARK: - A custom .ipa
-
-    /// Where picked IPAs are copied, one folder each. Emptied when SideInstaller
-    /// opens, as nothing in it outlives a launch.
-    private static var customIPAFolder: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("side-by-side-ipa", isDirectory: true)
-    }
-
-    /// Takes the IPA picked in Files as the one `.custom` installs, replacing
-    /// any picked before, and picks `.custom`. Only a complete IPA replaces it.
-    @MainActor
-    func importCustomIPA(from url: URL) async {
-        guard !isImportingIPA, !isRunning else { return }
-        isImportingIPA = true
-        importError = nil
-        defer { isImportingIPA = false }
-        engine.log("Side by Side: importing \(url.lastPathComponent) …")
-        do {
-            let picked: CustomIPA = try await withCheckedThrowingContinuation { cont in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    do { cont.resume(returning: try Self.stageCustomIPA(from: url)) }
-                    catch { cont.resume(throwing: error) }
-                }
-            }
-            discardCustomIPA()
-            customIPA = picked
-            app = .custom
-            let setUp = picked.build.map { "It's \($0.displayName), so it's set up like SideInstaller's own." }
-                ?? "Any other app is signed and installed as it is, with no pairing file."
-            engine.log("Side by Side: picked \(picked.name)\(picked.version.map { " \($0)" } ?? "") (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(picked.file.path)), countStyle: .file))). \(setUp)")
-        } catch IPALibrary.ImportError.notAnIPA {
-            importError = L("%@ isn't an IPA. Pick the .ipa file itself — if it looks right, the download may have saved an error page instead, or stopped partway.",
-                            url.lastPathComponent)
-            engine.log("⛔️ Side by Side import: \(importError ?? "")")
-        } catch {
-            importError = L("Couldn't import %@: %@", url.lastPathComponent, error.localizedDescription)
-            engine.log("⛔️ Side by Side import: \(importError ?? "")")
-        }
-    }
-
-    /// Copies the picked file into a folder of its own and reads what it is.
-    /// The picker's temporary copy is moved instead. Blocking.
-    private static func stageCustomIPA(from url: URL) throws -> CustomIPA {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let fm = FileManager.default
-        let folder = customIPAFolder.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        let base = url.deletingPathExtension().lastPathComponent
-        let file = folder.appendingPathComponent((base.isEmpty ? "App" : base) + ".ipa")
-        do {
-            let tmp = fm.temporaryDirectory.resolvingSymlinksInPath().path
-            if url.resolvingSymlinksInPath().path.hasPrefix(tmp + "/") {
-                try fm.moveItem(at: url, to: file)
-            } else {
-                try fm.copyItem(at: url, to: file)
-            }
-            guard IPALibrary.looksLikeIPA(file) else { throw IPALibrary.ImportError.notAnIPA }
-            // No Info.plist read (a ZIP64 archive, say) still signs; it's just
-            // named after its file.
-            let info = IPALibrary.appInfo(at: file)
-            return CustomIPA(file: file,
-                             name: info?.name ?? (base.isEmpty ? L("Custom .ipa") : base),
-                             version: info?.version,
-                             build: info.flatMap { knownBuild(ofIPAAt: file, bundleID: $0.bundleID) })
-        } catch {
-            try? fm.removeItem(at: folder)
-            throw error
-        }
-    }
-
-    /// The build of SideInstaller's own an IPA is, by its bundle ID: SideInstaller,
-    /// SideStore, LiveContainer carrying SideStore, or AltStore. Nil for any
-    /// other app.
-    private static func knownBuild(ofIPAAt url: URL, bundleID id: String) -> SideBySideApp? {
-        if id == sideInstallerBundleID || id.hasPrefix(sideInstallerBundleID + ".") { return .sideInstaller }
-        switch IPALibrary.knownSource(ofIPAAt: url) {
-        case .sideStore?:     return .sideStore
-        case .liveContainer?: return .liveContainer
-        case .altStore?:      return .altStore
-        default:              return nil
-        }
-    }
-
-    /// Deletes the picked IPA's copy.
-    private func discardCustomIPA() {
-        guard let picked = customIPA else { return }
-        customIPA = nil
-        if downloadedIPA == picked.file { downloadedIPA = nil }
-        try? FileManager.default.removeItem(at: picked.file.deletingLastPathComponent())
+        engine.log("Side by Side: forgot the pairing with their iPhone.")
     }
 
     // MARK: - Step 0: Local Network permission
@@ -802,7 +369,7 @@ final class SideBySideManager: ObservableObject {
     private func ensureLocalNetwork() async {
         guard !askedLocalNetwork else { return }
         askedLocalNetwork = true
-        engine.log("Checking Local Network permission, which reaching their iPhone needs…")
+        engine.log("Checking Local Network permission — reaching their iPhone needs it…")
         let localNetwork = LocalNetworkAuthorization()
         if await localNetwork.request(timeout: 8) {
             engine.log("Local Network OK.")
@@ -816,33 +383,27 @@ final class SideBySideManager: ObservableObject {
     /// Opens the link to their iPhone, and returns the address it's reached at:
     /// the one typed in, or the one it paired from.
     @MainActor
-    private func connectToTarget(app: SideBySideApp) async throws -> String {
+    private func connectToTarget(typedIP: String?) async throws -> String {
         try Task.checkCancellation()
-        setStep(.connect, .active)
-        let typed = typedAddress
-        // With no address, their iPhone pairs from its Settings, unless an
-        // earlier attempt left a record for the address it was reached at.
+        setStep(.connect, .waiting)
+        // With no address there's no saved record to find and no lockdownd to
+        // ask, so their iPhone pairs from its Settings.
         var outcome = ConnectOutcome.needsRemotePairing
-        if let typed {
-            outcome = try await onDeviceQueue { try self.performConnect(ip: typed) }
-        } else if let ip = pairedAddress {
-            outcome = try await onDeviceQueue { try self.reconnect(ip: ip) }
+        if let typedIP {
+            outcome = try await onDeviceQueue { try self.performConnect(ip: typedIP) }
         }
         let target: ConnectedTarget
         switch outcome {
         case let .connected(connected):
             target = connected
         case .needsRemotePairing:
-            target = try await connectByRemotePairing(typedIP: typed)
+            target = try await connectByRemotePairing(typedIP: typedIP)
         }
         targetSummary = target.summary
-        targetOSVersion = target.osVersion
         targetUDID = target.udid
         targetName = target.name
-        // Kept so a retry finds the record saved for it. A typed address their
-        // iPhone didn't pair from is corrected the same way.
-        pairedAddress = target.address
-        if typed != nil { targetIP = target.address }
+        // Filled in so a retry finds the record saved for it.
+        targetIP = target.address
         remembersTheirIPhone = true
         setStep(.connect, .done)
         return target.address
@@ -850,7 +411,6 @@ final class SideBySideManager: ObservableObject {
 
     private struct ConnectedTarget {
         let summary: String
-        let osVersion: String?
         let udid: String?
         let name: String?
         let address: String
@@ -859,45 +419,32 @@ final class SideBySideManager: ObservableObject {
     /// How far connecting got without their iPhone's Settings.
     private enum ConnectOutcome {
         case connected(ConnectedTarget)
-        /// lockdownd answered but won't pair over Wi-Fi, or there's no address
-        /// to ask, so their iPhone has to pair from its own Settings.
+        /// lockdownd answered but won't pair over Wi-Fi, so their iPhone has to
+        /// pair from its own Settings.
         case needsRemotePairing
     }
 
-    /// Opens the link with a record saved by an earlier attempt, or by pairing
-    /// over lockdown. Runs on `deviceQueue`.
+    /// Opens the link with a record saved by an earlier run, or by pairing over
+    /// lockdown. Runs on `deviceQueue`.
     private func performConnect(ip: String) throws -> ConnectOutcome {
-        // Whether anything answers there at all, in seconds: lockdownd's own
-        // connect waits out the system's minute-long timeout first. Silence is
-        // the address or the network, which no pairing gets past; a refusal is
-        // their iPhone, there but not listening on Wi-Fi.
-        let reach = NetworkStatus.probeConnect(host: ip, port: DeviceConnection.lockdownPort, timeout: 6000)
-        engine.log("Their iPhone at \(ip), lockdownd's port \(DeviceConnection.lockdownPort): \(reach).")
-        guard reach.answered else { throw EngineError.message(Self.unreachableAdvice(ip: ip, typed: true)) }
-
-        // Records saved by an earlier attempt first: pairing needs them at their
+        // Records saved by an earlier run first: pairing needs them at their
         // iPhone, and uses one of its pairing slots.
-        if let saved = try connectWithSavedRecords(ip: ip, typed: true) { return .connected(saved) }
-        guard reach == .connected else {
-            engine.log("lockdownd on \(ip) refuses connections over Wi-Fi. iOS 27 only pairs over a network from its own Settings, so switching to Remote Pairing.")
-            return .needsRemotePairing
+        if try connectWithSavedRecord(PrivateStore.peerRemotePairing(host: ip), ip: ip) {
+            return .connected(try describeTarget(ip: ip))
+        }
+        let record = PrivateStore.peerPairRecord(host: ip)
+        if try connectWithSavedRecord(record, ip: ip) {
+            return .connected(try describeTarget(ip: ip))
         }
 
-        engine.log("Asking \(ip) to pair. Their iPhone has to be unlocked, and they have to tap Trust …")
-        let record = PrivateStore.peerPairRecord(host: ip)
+        engine.log("Asking \(ip) to pair — their iPhone has to be unlocked, and they have to tap Trust …")
         let data: Data
         do {
-            // Shown once their iPhone answers, which is when it can prompt, and
-            // over once the prompt is answered, before the link opens.
-            defer { showTrustWait(false) }
-            // A HostID of its own: the record lives on in the app on their
-            // iPhone, and pairing again under the same one would replace it.
             data = try connection.lockdownPairRecordDirect(
                 hosts: [ip],
-                hostID: UUID().uuidString,
+                hostID: CompositePairingFile.hostID,
                 systemBUID: CompositePairingFile.systemBUID,
-                hostName: "SideInstaller",
-                onConnected: { [weak self] in self?.showTrustWait(true) })
+                hostName: "SideInstaller")
         } catch let error as DeviceConnection.LockdownPairError {
             if error.userDeclined {
                 throw EngineError.message(L("They tapped “Don't Trust” on their iPhone. Start again, and have them tap Trust."))
@@ -906,9 +453,9 @@ final class SideBySideManager: ObservableObject {
             // another way can't get past. A refusal comes from their iPhone:
             // it's there, and lockdownd just isn't listening on Wi-Fi.
             if error.stage == .connect, !DeviceConnection.wasRefused(error.underlying) {
-                throw EngineError.message(Self.unreachableAdvice(ip: ip, typed: true))
+                throw EngineError.message(Self.unreachableAdvice(ip: ip))
             }
-            engine.log("lockdownd on \(ip) won't pair over Wi-Fi (\(error)). iOS 27 only pairs over a network from its own Settings, so switching to Remote Pairing.")
+            engine.log("lockdownd on \(ip) won't pair over Wi-Fi (\(error)) — iOS 27 only pairs over a network from its own Settings. Switching to Remote Pairing.")
             return .needsRemotePairing
         }
         try data.write(to: record, options: .atomic)
@@ -918,92 +465,39 @@ final class SideBySideManager: ObservableObject {
         return .connected(try describeTarget(ip: ip))
     }
 
-    /// Opens the link again with the record an earlier attempt saved for the
-    /// address their iPhone was reached at, when no address was typed in. When
-    /// nothing answers there, or the record no longer opens a link, their
-    /// iPhone pairs from its Settings again, which also finds it at a new
-    /// address. Runs on `deviceQueue`.
-    private func reconnect(ip: String) throws -> ConnectOutcome {
-        guard [PrivateStore.peerRemotePairing(host: ip), PrivateStore.peerPairRecord(host: ip)]
-            .contains(where: { fileSize($0.path) > 0 }) else { return .needsRemotePairing }
-        let reach = NetworkStatus.probeConnect(host: ip, port: DeviceConnection.lockdownPort, timeout: 6000)
-        engine.log("Their iPhone at \(ip), lockdownd's port \(DeviceConnection.lockdownPort): \(reach).")
-        guard reach.answered else {
-            engine.log("Nothing answers at \(ip) now. Their iPhone pairs from its Settings again, which tells this iPhone where it is.")
-            return .needsRemotePairing
-        }
-        if let saved = try connectWithSavedRecords(ip: ip, typed: false) { return .connected(saved) }
-        engine.log("Their iPhone pairs from its Settings again.")
-        return .needsRemotePairing
-    }
-
-    /// Opens the link with a record an earlier attempt saved for `ip`: the
-    /// RPPairing file first, then the lockdown record. Nil when there's none,
-    /// or none opened a link and pairing again might. `typed` says whether `ip`
-    /// was typed in, for the advice when it can't be reached.
-    private func connectWithSavedRecords(ip: String, typed: Bool) throws -> ConnectedTarget? {
-        for record in [PrivateStore.peerRemotePairing(host: ip), PrivateStore.peerPairRecord(host: ip)] {
-            if try connectWithSavedRecord(record, ip: ip, typed: typed) { return try describeTarget(ip: ip) }
-        }
-        return nil
-    }
-
-    /// Opens the link with `record`, saved by an earlier attempt. False when
-    /// there is none, or it didn't open a link and pairing again might.
-    private func connectWithSavedRecord(_ record: URL, ip: String, typed: Bool) throws -> Bool {
+    /// Opens the link with `record`, saved by an earlier run. False when there
+    /// is none, or it didn't open a link and pairing again might.
+    private func connectWithSavedRecord(_ record: URL, ip: String) throws -> Bool {
         guard fileSize(record.path) > 0 else { return false }
         engine.log("Trying the pair record already saved for \(ip) (\(record.lastPathComponent)) …")
         do {
             try connection.connect(deviceIP: ip, pairingFilePath: record.path, allowLockdownMinting: false)
         } catch let error as DeviceConnection.TunnelError where !error.repairingCouldHelp {
             // The link never reached their iPhone, so pairing again won't either.
-            throw EngineError.message(Self.tunnelAdvice(error, ip: ip, typed: typed))
+            throw EngineError.message(Self.tunnelAdvice(error, ip: ip))
         } catch {
-            engine.log("That record didn't open a link (\(error)). Pairing again …")
+            engine.log("That record didn't open a link (\(error)). Pairing again…")
             return false
         }
         pairRecordPath = record.path
         return true
     }
 
-    /// Shows the Trust card while their iPhone may be showing its prompt.
-    /// Called from `deviceQueue`. A lockdownd that won't pair answers at once,
-    /// so only a wait that lasts a moment shows the card, and it never flashes.
-    private func showTrustWait(_ waiting: Bool) {
-        DispatchQueue.main.async {
-            self.trustWaits += 1
-            guard waiting else {
-                self.setTrustWait(false)
-                return
-            }
-            let wait = self.trustWaits
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                guard self.trustWaits == wait else { return }
-                self.setTrustWait(true)
-            }
-        }
-    }
-
-    /// Main thread only.
-    private func setTrustWait(_ waiting: Bool) {
-        waitingForTrust = waiting
-        let state = stepStates[.connect]
-        guard state == .active || state == .waiting else { return }
-        stepStates[.connect] = waiting ? .waiting : .active
-    }
-
-    /// Has their iPhone pair from its own Settings, the way iOS 27 pairs over
-    /// a network, then opens the link with the RPPairing file that produces,
+    /// Has their iPhone pair from its own Settings — the way iOS 27 pairs over
+    /// a network — then opens the link with the RPPairing file that produces,
     /// at the address their iPhone connected from. That's where it is, even if
     /// a different address was typed in.
     @MainActor
     private func connectByRemotePairing(typedIP: String?) async throws -> ConnectedTarget {
-        let pairingFile = PrivateStore.unaddressedPeerRemotePairing
-        // A leftover would lend this pairing its keys and identifier.
-        try? FileManager.default.removeItem(at: pairingFile)
-        // An identifier of its own: the record lives on in the app on their
-        // iPhone, and pairing again under the same one would replace it.
-        let paired = try await pairFromSettings(record: pairingFile, identifier: UUID().uuidString.lowercased())
+        let pairingFile: URL
+        if let typedIP {
+            pairingFile = PrivateStore.peerRemotePairing(host: typedIP)
+        } else {
+            pairingFile = PrivateStore.unaddressedPeerRemotePairing
+            // A leftover would lend this pairing its keys.
+            try? FileManager.default.removeItem(at: pairingFile)
+        }
+        let paired = try await pairFromSettings(record: pairingFile)
         let ip = paired.address
         // Their own Settings lists this iPhone's host too.
         guard !NetworkStatus.isOwnAddress(ip) else {
@@ -1011,7 +505,7 @@ final class SideBySideManager: ObservableObject {
             throw EngineError.message(L("The iPhone that paired was this one. Pair from their iPhone's Settings instead. To install on this iPhone, use the Install tab."))
         }
         if let typedIP, typedIP != ip {
-            engine.log("Their iPhone paired from \(ip), not \(typedIP), so it's reached there.")
+            engine.log("Their iPhone paired from \(ip), not \(typedIP) — reaching it there.")
         }
         // Filed under the address it's reached at, where a retry looks for it.
         let recordPath = Self.move(paired.path, to: PrivateStore.peerRemotePairing(host: ip).path)
@@ -1033,10 +527,9 @@ final class SideBySideManager: ObservableObject {
     /// has paired with it from Settings, showing the code it asks for. The
     /// instructions stay up until then; Cancel stops the wait.
     @MainActor
-    private func pairFromSettings(record: URL, identifier: String?) async throws -> PairingController.PairedDevice {
+    private func pairFromSettings(record: URL) async throws -> PairingController.PairedDevice {
         try Task.checkCancellation()
         pairingInSettings = true
-        setStep(.connect, .waiting)
         defer {
             pairingInSettings = false
             pairingPIN = nil
@@ -1044,15 +537,14 @@ final class SideBySideManager: ObservableObject {
         engine.log("Waiting for them to pair: on their iPhone, Settings › Privacy & Security › Developer Mode › “Pair with \(PairingController.peerHostName)”, then the code shown here.")
         do {
             return try await withTaskCancellationHandler {
-                try await PairingController.shared.pairPeer(outPath: record.path,
-                                                            identifier: identifier) { [weak self] pin in
+                try await PairingController.shared.pairPeer(outPath: record.path) { [weak self] pin in
                     self?.pairingPIN = pin
                 }
             } onCancel: {
                 Task { @MainActor in PairingController.shared.cancelPeer() }
             }
         } catch PairingController.PairingError.busy {
-            throw EngineError.message(L("SideInstaller is already waiting for an iPhone to pair with it, from the Install tab, the Pairing page, or an earlier attempt here. Finish that pairing, or close and reopen SideInstaller, then try again."))
+            throw EngineError.message(L("SideInstaller is already waiting for an iPhone to pair with it — from the Install tab, the Pairing page, or an earlier attempt here. Finish that pairing, or close and reopen SideInstaller, then try again."))
         } catch let PairingController.PairingError.failed(message) {
             throw EngineError.message(L("Pairing with their iPhone didn't finish: %@", message))
         }
@@ -1072,58 +564,29 @@ final class SideBySideManager: ObservableObject {
             for (key, value) in info { values[key] = value; engine.log("  \(key) = \(value)") }
         }
         let name = values["DeviceName"] ?? L("device")
-        let version = values["ProductVersion"]
-        let summary = version.map { "\(name) · iOS \($0)" } ?? name
+        let summary = values["ProductVersion"].map { "\(name) · iOS \($0)" } ?? name
         return ConnectedTarget(summary: summary,
-                               osVersion: version,
                                udid: values["UniqueDeviceID"],
                                name: values["DeviceName"],
                                address: ip)
     }
 
-    /// Stops before anything is signed when a SideStore build can't work with
-    /// the pairing their iPhone gave: from iOS 26.4 on, lockdownd hangs up on a
-    /// lockdown record that comes through LocalDevVPN, and only iOS 27 pairs
-    /// from its Settings, which gives the RPPairing record that works.
-    /// SideInstaller is installed all the same, without the record
-    /// (`pairingLeftOutOn`): a pairing file made on a computer gets it going.
-    /// So is AltStore, which pairs itself as its Remote AltServer is set up
-    /// when the record is one it can't use (`handOffToAltStore`).
-    @MainActor
-    private func checkCompatibility(of app: SideBySideApp) throws {
-        guard app != .altStore, let version = targetOSVersion, let path = pairRecordPath else { return }
-        let kind = PairingFileKind.of(path: path)
-        guard kind.hasLockdown, !kind.hasRemotePairing, Self.version(version, isAtLeast: 26, 4) else { return }
-        guard app.source != nil else {
-            pairingLeftOutOn = version
-            engine.log("Their iPhone runs iOS \(version) and paired over lockdown only. From iOS 26.4 on, lockdownd hangs up on that record when it comes through LocalDevVPN, so SideInstaller is installed without it and needs a pairing file made on a computer.")
-            return
-        }
-        engine.log("Their iPhone runs iOS \(version) and paired over lockdown only: from iOS 26.4 on, lockdownd hangs up on that record when \(app.displayName) brings it through LocalDevVPN. Stopping before anything is signed.")
-        throw EngineError.message(ErrorHelp.explained(L("Their iPhone runs iOS %@. From iOS 26.4 on, %@ can't use the pairing their iPhone gives over Wi-Fi. iOS 27 pairs from its own Settings instead, which works: update their iPhone, then try again and answer No when asked for its IP.", version, app.displayName)))
-    }
-
-    /// What to say when the link to their iPhone didn't come up. The error's
-    /// own advice is about the Install tab's loopback VPN, which Side by Side
-    /// doesn't use. `typed` is true when `ip` was typed in here, rather than
-    /// the address their iPhone paired from.
-    private static func tunnelAdvice(_ error: DeviceConnection.TunnelError, ip: String,
-                                     typed: Bool = false) -> String {
+    /// What to say when the Remote Pairing tunnel to their iPhone didn't come
+    /// up. The error's own advice is about the Install tab's loopback VPN,
+    /// which Side by Side doesn't use.
+    private static func tunnelAdvice(_ error: DeviceConnection.TunnelError, ip: String) -> String {
         switch error.kind {
         case TunnelFailureRsdUnreachable where DeviceConnection.wasRefused(error.underlying):
             return L("Their iPhone at %@ refused the connection. It only accepts one while Developer Mode is on, and iOS asks to confirm Developer Mode again after every restart: on their iPhone, turn it on under Settings › Privacy & Security › Developer Mode, then try again.", ip)
         case TunnelFailureRsdUnreachable:
-            return unreachableAdvice(ip: ip, typed: typed)
+            return unreachableAdvice(ip: ip)
         default:
             return L("The link to their iPhone didn't come up: %@", error.underlying.description)
         }
     }
 
-    /// The address itself is worth checking only when it was typed in.
-    private static func unreachableAdvice(ip: String, typed: Bool) -> String {
-        typed
-            ? L("Couldn't reach their iPhone at %@. Check the address (Settings › Wi-Fi › ⓘ on their iPhone), that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.", ip)
-            : L("Couldn't reach their iPhone at %@. Check that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.", ip)
+    private static func unreachableAdvice(ip: String) -> String {
+        L("Couldn't reach their iPhone at %@. Check the address (Settings › Wi-Fi › ⓘ on their iPhone), that both iPhones are on the same Wi-Fi network, and that Local Network is on for SideInstaller in this iPhone's Settings. Guest and public networks often keep devices from reaching each other.", ip)
     }
 
     // MARK: - Step 2: Apple ID sign-in
@@ -1131,34 +594,17 @@ final class SideBySideManager: ObservableObject {
     @MainActor
     private func signIn(id: String, pw: String) async throws {
         if signSession != nil, signedInAs?.caseInsensitiveCompare(id) == .orderedSame {
-            engine.log("Already signed in as \(LogRedactor.maskAppleID(id)), skipping.")
+            engine.log("Already signed in as \(LogRedactor.maskAppleID(id)) — skipping.")
             setStep(.signIn, .done)
             return
         }
         setStep(.signIn, .active)
-        // One Apple ID sign-in at a time (`AppleSignInQueue`).
-        let ticket = try await engine.appleSignIns.waitForTurn(.sideBySide, appleID: id)
-        defer { engine.appleSignIns.finished(ticket) }
 
         // Anisette servers go down often, so with Auto on try each one before
         // giving up. A server picked in Settings is the only one tried.
-        let servers = engine.anisetteCandidates()
-        // An Apple ID saved here is this iPhone's owner's, so it signs in from
-        // their own folder and keeps reusing their signing key and certificate.
-        // Anyone else's signs in from a temporary folder, deleted with the
-        // session, so their key doesn't stay on this iPhone.
-        let isSavedHere = AccountStore.shared.isSaved(id)
-        // The team picked for an Apple ID saved here; anyone else's is asked
-        // when they're on more than one, and nothing is kept.
-        let team = isSavedHere ? AccountStore.shared.team(for: id)?.teamId : nil
-        let dir: String
-        if isSavedHere {
-            discardTemporarySignIn()
-            engine.log("Side by Side: \(LogRedactor.maskAppleID(id)) is saved in Settings › Account, so it signs in with this iPhone's own signing key.")
-            dir = PrivateStore.isideload.path
-        } else {
-            dir = try temporarySignInFolder(for: id).path
-        }
+        let servers = anisetteCandidates()
+        let dir = PrivateStore.isideload.path
+        engine.twoFactorWasCancelled = false
         var failures = AnisetteServer.SignInFailures()
         var appleRefusals = AnisetteServer.AppleRefusals(servers: engine.anisetteServers)
         var appleUnreachable = 0
@@ -1172,17 +618,9 @@ final class SideBySideManager: ObservableObject {
             }
             do {
                 let summary = try await onSignQueue {
-                    try self.performSignIn(id: id, pw: pw, anisette: anisette, dir: dir,
-                                           team: team, ticket: ticket)
+                    try self.performSignIn(id: id, pw: pw, anisette: anisette, dir: dir)
                 }
-                if isSavedHere {
-                    engine.anisetteSignedIn(anisette)
-                } else {
-                    // Not made the server tried first, as `anisetteSignedIn`
-                    // does with Auto on: the identity it kept is in the
-                    // temporary folder, not this iPhone's own.
-                    AnisetteServer.RecentFailures.clear(anisette)
-                }
+                engine.anisetteSignedIn(anisette)
                 signedInAs = id
                 engine.log("Side by Side: signed in (\(summary)).")
                 setStep(.signIn, .done)
@@ -1190,12 +628,8 @@ final class SideBySideManager: ObservableObject {
             } catch let error as EngineError {
                 let failure = error.errorDescription ?? "sign-in failed"
                 // A cancelled 2FA prompt isn't the server's fault.
-                if ticket.twoFactorWasCancelled {
+                if engine.twoFactorWasCancelled {
                     throw EngineError.message(L("Two-factor verification was cancelled."))
-                }
-                // Nor is a team question closed unanswered.
-                if ticket.teamQuestionWasCancelled {
-                    throw EngineError.message(Engine.noTeamPickedMessage)
                 }
                 // A locked account fails everywhere, and retrying keeps it locked.
                 if Engine.isAccountLocked(failure) {
@@ -1225,7 +659,7 @@ final class SideBySideManager: ObservableObject {
                 failures.failed(anisette, error: failure)
                 engine.anisetteFailed(anisette, error: failure)
                 if Engine.isAppleRateLimit(failure) {
-                    engine.log("Side by Side: Apple is rate limiting sign-in (HTTP 429), stopping.")
+                    engine.log("Side by Side: Apple is rate-limiting sign-in (HTTP 429) — stopping.")
                     throw EngineError.message(Engine.appleRateLimitMessage)
                 }
                 // Apple refuses a reported device through every server alike;
@@ -1236,14 +670,14 @@ final class SideBySideManager: ObservableObject {
                 if Engine.isAppleTokenRefusal(failure) {
                     appleRefusals.recordTokenRefusal(anisette)
                     if appleRefusals.rulesOutAll(servers[(index + 1)...]) {
-                        engine.log("Side by Side: Apple refused the sign-in token (-80046), stopping.")
+                        engine.log("Side by Side: Apple refused the sign-in token (-80046) — stopping.")
                         throw EngineError.message(engine.appleTokenRefusalMessage(through: anisette))
                     }
                 }
                 if Engine.isAppleServiceRefusal(failure) {
                     appleRefusals.record(anisette)
                     if appleRefusals.endsSignIn(remaining: servers[(index + 1)...]) {
-                        engine.log("Side by Side: Apple's sign-in server refused \(appleRefusals.count) attempts with HTTP 503, stopping.")
+                        engine.log("Side by Side: Apple's sign-in server refused \(appleRefusals.count) attempts with HTTP 503 — stopping.")
                         throw EngineError.message(Engine.appleServiceRefusalMessage)
                     }
                 }
@@ -1263,38 +697,17 @@ final class SideBySideManager: ObservableObject {
         throw EngineError.message(engine.anisetteSignInFailure(failures))
     }
 
-    /// The temporary folder `id` signs in from: the one made for it by an
-    /// earlier attempt, so a retry signs in as the same device, or a new one.
-    /// Another Apple ID's folder is deleted first.
-    @MainActor
-    private func temporarySignInFolder(for id: String) throws -> URL {
-        if let current = temporarySignIn, current.appleID.caseInsensitiveCompare(id) == .orderedSame {
-            return current.folder
-        }
-        discardTemporarySignIn()
-        do {
-            let folder = try PrivateStore.newPeerSignInFolder()
-            temporarySignIn = TemporarySignIn(appleID: id, folder: folder)
-            engine.log("Side by Side: \(LogRedactor.maskAppleID(id)) signs in from a new temporary folder, deleted once the app is set up on their iPhone or on Clear.")
-            return folder
-        } catch {
-            throw EngineError.message(error.localizedDescription)
-        }
-    }
-
     /// One sign-in attempt against a specific anisette server. Uses the machine
     /// name `SideInstaller`, so an existing certificate is recognized as reusable.
-    /// `team` is the one picked for an Apple ID saved here (`Engine.answerTeam`).
-    private func performSignIn(id: String, pw: String, anisette: String, dir: String,
-                               team: String?, ticket: AppleSignInTicket) throws -> String {
-        defer { engine.endSignInQuestions(for: ticket) }
+    private func performSignIn(id: String, pw: String, anisette: String, dir: String) throws -> String {
+        defer { engine.endTwoFactor() }
         engine.log("Apple ID sign-in for \(LogRedactor.maskAppleID(id)) via anisette \(Engine.oneLine(anisette)) …")
         var session: OpaquePointer?
         var summary: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        // 0 = don't save the session: it may be someone else's Apple ID.
-        let rc = si_apple_signin(id, pw, anisette, "SideInstaller", dir, 0, team ?? "",
-                                 appleSignInTwoFactorCallback, appleSignInTeamCallback, ticket.context,
+        // 0 = don't save the session: it's someone else's Apple ID.
+        let rc = si_apple_signin(id, pw, anisette, "SideInstaller", dir, 0,
+                                 sideBySideTwoFactorCallback, nil,
                                  &session, &summary, &error)
         if rc == 0 {
             if let old = signSession { si_sign_session_free(old) }
@@ -1309,50 +722,18 @@ final class SideBySideManager: ObservableObject {
         }
     }
 
-    // MARK: - Step 3: download the build
+    // MARK: - Step 3: fetch the release build
 
     @MainActor
-    private func download(_ app: SideBySideApp, channel: ReleaseChannel, custom: CustomIPA?) async throws {
+    private func download() async throws {
         try Task.checkCancellation()
-        if let custom {
-            guard FileManager.default.fileExists(atPath: custom.file.path) else {
-                throw EngineError.message(ErrorHelp.explained(L("Pick an .ipa to install.")))
-            }
-            discardDownload()
-            // The picked file stays this page's until another is picked, so it
-            // isn't the download's to delete.
-            downloadedIPA = custom.file
-            engine.log("Using \(custom.file.lastPathComponent), the .ipa picked for Side by Side (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(custom.file.path)), countStyle: .file))).")
+        if let existing = downloadedIPA, FileManager.default.fileExists(atPath: existing.path) {
+            engine.log("SideInstaller IPA already downloaded — skipping.")
             setStep(.download, .done)
             return
         }
-        let key = app.source == nil ? app.rawValue : "\(app.rawValue)-\(channel.rawValue)"
-        if let existing = downloadedIPA, downloadedKey == key,
-           FileManager.default.fileExists(atPath: existing.path) {
-            engine.log("\(app.displayName) IPA already downloaded, skipping.")
-            setStep(.download, .done)
-            return
-        }
-        discardDownload()
         setStep(.download, .active)
         downloadProgress = 0
-        let file: URL
-        if let source = app.source {
-            file = try await downloadBuild(source, channel: channel)
-        } else {
-            file = try await downloadSideInstaller()
-        }
-        downloadedIPA = file
-        downloadedKey = key
-        ownsDownload = app.source == nil
-        downloadProgress = 1
-        engine.log("\(app.displayName) IPA ready at \(file.path) (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(file.path)), countStyle: .file))).")
-        setStep(.download, .done)
-    }
-
-    /// SideInstaller's latest release, into a staging folder of its own.
-    @MainActor
-    private func downloadSideInstaller() async throws -> URL {
         engine.log("Fetching the latest SideInstaller release from \(Self.releaseIPA.absoluteString) …")
         do {
             let file = try await SideStoreDownloader.fetchDirect(
@@ -1363,88 +744,44 @@ final class SideBySideManager: ObservableObject {
             // later during signing.
             guard IPALibrary.looksLikeIPA(file) else {
                 try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-                throw EngineError.message(L("The release download wasn't an IPA. GitHub may be returning an error page, so try again in a minute."))
+                throw EngineError.message(L("The release download wasn't an IPA. GitHub may be returning an error page — try again in a minute."))
             }
-            return file
+            downloadedIPA = file
+            downloadProgress = 1
+            engine.log("SideInstaller IPA ready at \(file.path) (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(file.path)), countStyle: .file))).")
+            setStep(.download, .done)
         } catch let error as SideStoreDownloader.DownloadError {
             throw EngineError.message(L("Couldn't download the latest SideInstaller release: %@", error.description))
         }
     }
 
-    /// A SideStore build's latest release on `channel`, or AltStore's newest
-    /// version their iOS runs, as the Install tab fetches it: into Documents,
-    /// skipped when the copy there is still the file being served, and an IPA
-    /// the user put there themselves is used as it is.
-    @MainActor
-    private func downloadBuild(_ source: InstallSource, channel: ReleaseChannel) async throws -> URL {
-        let onDisk = IPALibrary.entry(source: source, channel: channel)
-        if let onDisk, onDisk.isImported {
-            engine.log("Using \(onDisk.url.lastPathComponent), which you put in Documents, as the Install tab does.")
-            return onDisk.url
-        }
-        engine.log("Fetching the \(channel.displayName) \(source.displayName) release …")
-        let report: @Sendable (Double) -> Void = { [weak self] fraction in
-            Task { @MainActor in self?.downloadProgress = fraction }
-        }
-        // Their iOS, not this iPhone's, decides which AltStore version goes on.
-        let theirOS = targetOSVersion.flatMap(SideStoreDownloader.osVersion)
-            ?? ProcessInfo.processInfo.operatingSystemVersion
-        do {
-            let path = try await SideStoreDownloader.$reportProgress.withValue(report) {
-                try await SideStoreDownloader.downloadLatest(source: source, channel: channel,
-                                                             runningOn: theirOS) { [weak self] line in
-                    self?.engine.log(line)
-                }
-            }
-            return URL(fileURLWithPath: path)
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            // Offline or blocked: a copy an earlier run left behind will do.
-            if let onDisk {
-                engine.log("⚠️ Download failed (\(short(error))), using \(onDisk.url.lastPathComponent) already in Documents instead.")
-                return onDisk.url
-            }
-            throw EngineError.message(L("Couldn't download %@: %@", source.displayName, short(error)))
-        }
-    }
-
-    /// Delete the downloaded IPA when it's this page's own copy, with the
-    /// staging folder it lives in.
+    /// Delete the downloaded IPA and the staging directory it lives in.
     private func discardDownload() {
-        if ownsDownload, let file = downloadedIPA {
-            try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
-        }
+        guard let file = downloadedIPA else { return }
+        try? FileManager.default.removeItem(at: file.deletingLastPathComponent())
         downloadedIPA = nil
-        downloadedKey = nil
-        ownsDownload = false
     }
 
     // MARK: - Step 4: sign for their device
 
     @MainActor
-    private func signApp(_ app: SideBySideApp) async throws {
+    private func signApp() async throws {
         try Task.checkCancellation()
         guard let session = signSession else { throw EngineError.message(L("Not signed in.")) }
-        guard let ipa = downloadedIPA else {
-            throw EngineError.message(app == .custom ? L("Pick an .ipa to install.")
-                                      : app.source == nil ? L("No SideInstaller IPA downloaded.")
-                                                          : L("No SideStore IPA downloaded."))
-        }
+        guard let ipa = downloadedIPA else { throw EngineError.message(L("No SideInstaller IPA downloaded.")) }
         // Their UDID is registered with the team before the profile is asked
         // for, or Apple refuses it with error 8220.
         let udid = targetUDID ?? ""
         let name = targetName ?? ""
         if udid.isEmpty {
-            engine.log("⚠️ No UDID captured from their iPhone, so signing may fail with error 8220.")
+            engine.log("⚠️ No UDID captured from their iPhone — signing may fail with error 8220.")
         }
         setStep(.sign, .active)
         let path = try await onSignQueue {
             try self.performSign(session: session, ipa: ipa.path, udid: udid, deviceName: name)
         }
         signedAppPath = path
-        let info = Self.bundleInfo(at: path)
-        signedBundleID = info?.id
-        installedAppName = info?.name ?? (app == .custom ? runName : app.homeScreenName)
+        installedAppName = Self.displayName(ofBundleAt: path) ?? "SideInstaller"
         setStep(.sign, .done)
     }
 
@@ -1453,11 +790,8 @@ final class SideBySideManager: ObservableObject {
         engine.log("Signing \(ipa) for \(udid.isEmpty ? "their iPhone" : udid) …")
         var signed: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        // No bundled pairing file: only AltStore 2.3 read one, and from 2.3.1
-        // on it takes the file `setUp` writes into its Documents. No Increased
-        // Memory Limit: SideInstaller has no use for it, and the SideStore
-        // builds and AltStore re-register their App IDs without it. Every app
-        // gets its app group, as on the Install tab.
+        // SideInstaller has no use for a bundled pairing file, or for more
+        // memory; it gets its app group like any app.
         let rc = si_sign_ipa(session, ipa, udid, deviceName, nil, 0, 1, &signed, &error)
         if rc == 0 {
             let path = signed.map { String(cString: $0) } ?? ""
@@ -1473,11 +807,8 @@ final class SideBySideManager: ObservableObject {
             // Same errors as the Install tab, worded for another person's
             // account and iPhone.
             if Engine.isCertExistsError(message) {
-                throw EngineError.message(L("Apple won't issue a signing certificate for this Apple ID: it reports that one already exists (error 7460). One has to be revoked first. Use the Certificates tool if this is the Apple ID saved in Settings › Account, or developer.apple.com signed in as it otherwise."))
+                throw EngineError.message(L("Apple won't issue a signing certificate for this Apple ID: it reports that one already exists (error 7460). One has to be revoked first — with the Certificates tool if this is the Apple ID saved in Settings › Account, and at developer.apple.com signed in as it otherwise."))
             }
-            if Engine.isAppIDLimitError(message) { throw Self.explained(.appIDLimit) }
-            if Engine.isUnderageError(message) { throw Self.explained(.underage) }
-            if Engine.isEmailUnverifiedError(message) { throw Self.explained(.emailUnverified) }
             if Engine.isDeviceRegistrationError(message) {
                 throw EngineError.message(L("Apple wouldn't register their iPhone with this Apple ID's developer team, so it won't issue a provisioning profile. %@", message))
             }
@@ -1485,21 +816,18 @@ final class SideBySideManager: ObservableObject {
         }
     }
 
-    /// `error`'s message, marked as one that says how to fix it.
-    private static func explained(_ error: EngineError) -> EngineError {
-        .message(ErrorHelp.explained(error.errorDescription ?? String(describing: error)))
-    }
-
-    /// The bundle id and Home Screen name (display name, else bundle name) of
-    /// the signed `.app`.
-    private static func bundleInfo(at path: String) -> (id: String?, name: String?)? {
+    /// Home-screen name read from the signed `.app` (display name, else bundle
+    /// name).
+    private static func displayName(ofBundleAt path: String) -> String? {
         let plist = (path as NSString).appendingPathComponent("Info.plist")
         guard let data = FileManager.default.contents(atPath: plist),
-              let dict = (try? PropertyListSerialization.propertyList(from: data, options: [],
-                                                                      format: nil)) as? [String: Any]
+              let parsed = try? PropertyListSerialization.propertyList(from: data,
+                                                                       options: [],
+                                                                       format: nil),
+              let dict = parsed as? [String: Any]
         else { return nil }
         let name = (dict["CFBundleDisplayName"] as? String) ?? (dict["CFBundleName"] as? String)
-        return (dict["CFBundleIdentifier"] as? String, name?.isEmpty == false ? name : nil)
+        return (name?.isEmpty == false) ? name : nil
     }
 
     // MARK: - Step 5: install over AFC + installation_proxy
@@ -1511,327 +839,33 @@ final class SideBySideManager: ObservableObject {
         guard let record = pairRecordPath else { throw EngineError.message(L("No pair record for their iPhone.")) }
         setStep(.install, .active)
         engine.installProgress = 0
-        do {
-            try await onDeviceQueue {
-                // iOS drops the idle tunnel during sign-in and signing, and
-                // `isConnected` doesn't detect it, so reconnect first.
-                self.engine.log("Refreshing the link to \(ip) before installing …")
-                do {
-                    try self.connection.connect(deviceIP: ip, pairingFilePath: record,
-                                                allowLockdownMinting: false)
-                } catch let error as DeviceConnection.TunnelError {
-                    throw EngineError.message(Self.tunnelAdvice(error, ip: ip))
-                }
-                guard self.connection.isConnected else {
-                    throw EngineError.message(L("The link to their iPhone dropped. Start again."))
-                }
-                self.engine.log("Installing the signed bundle via AFC + installation_proxy …")
-                try self.connection.installSignedApp(bundlePath: bundle)
-                self.engine.log("Install request completed.")
+        try await onDeviceQueue {
+            // iOS drops the idle tunnel during sign-in and signing, and
+            // `isConnected` doesn't detect it, so reconnect first.
+            self.engine.log("Refreshing the link to \(ip) before installing …")
+            do {
+                try self.connection.connect(deviceIP: ip, pairingFilePath: record,
+                                            allowLockdownMinting: false)
+            } catch let error as DeviceConnection.TunnelError {
+                throw EngineError.message(Self.tunnelAdvice(error, ip: ip))
             }
-        } catch where Engine.isAppLimitError(String(describing: error)) {
-            engine.log("installd on their iPhone refused the app: \(error)")
-            throw EngineError.message(ErrorHelp.explained(L("Their iPhone already has three apps signed with a free Apple ID, the most iOS allows, counting expired ones. They need to delete one, then you can try again.")))
+            guard self.connection.isConnected else {
+                throw EngineError.message(L("The link to their iPhone dropped — start again."))
+            }
+            self.engine.log("Installing the signed bundle via AFC + installation_proxy …")
+            try self.connection.installSignedApp(bundlePath: bundle)
+            self.engine.log("Install request completed.")
         }
         engine.installProgress = 1
         setStep(.install, .done)
     }
 
-    // MARK: - Step 6: hand the app its pairing file
-
-    /// Puts the pair record into the app on their iPhone, so it opens ready to
-    /// go without pairing itself: into SideStore as the Install tab hands over
-    /// this iPhone's (`handOffToSideStore`), into AltStore where AltServer
-    /// puts it (`handOffToAltStore`), and into SideInstaller as an imported
-    /// pairing file (`handOffToSideInstaller`), which it connects with below
-    /// iOS 27 too.
-    @MainActor
-    private func setUp(_ app: SideBySideApp, ip: String, appleID: String) async throws {
-        try Task.checkCancellation()
-        guard let record = pairRecordPath else { throw EngineError.message(L("No pair record for their iPhone.")) }
-        guard let bundleID = signedBundleID else { throw EngineError.message(L("No signed bundle to install.")) }
-        setStep(.setUp, .active)
-        do {
-            if app == .altStore {
-                try await handOffToAltStore(ip: ip, record: record, bundleID: bundleID)
-            } else if let source = app.source {
-                try await handOffToSideStore(source, app: app, appleID: appleID, ip: ip,
-                                             record: record, bundleID: bundleID)
-            } else {
-                try await handOffToSideInstaller(ip: ip, record: record, bundleID: bundleID)
-            }
-        } catch {
-            throw EngineError.message(L("%@ is on their iPhone, but its pairing file couldn't be added (%@). Run Side by Side again, or import a pairing file in %@.",
-                                        app.displayName, short(error), app.homeScreenName))
-        }
-        setStep(.setUp, .done)
-    }
-
-    /// Puts the pair record into SideStore on their iPhone, the way the
-    /// Install tab hands over this iPhone's (`Engine.performWritePairing`): the
-    /// file older builds read, the split files and settings newer ones need,
-    /// the anisette settings that get past Apple's -80046, and the signing
-    /// certificate. Only the first is required; failing the others only logs.
-    @MainActor
-    private func handOffToSideStore(_ source: InstallSource, app: SideBySideApp, appleID: String,
-                                    ip: String, record: String, bundleID: String) async throws {
-        guard let home = source.sideStoreHome else { return }
-        let udid = targetUDID
-        let appName = app.homeScreenName
-        // Built on the sign queue, where every isideload call runs.
-        let certificate = await certificateHandOff(for: app, appleID: appleID)
-        try await onDeviceQueue {
-            try self.reconnectIfNeeded(ip: ip, record: record)
-            let pairing = try Self.pairingFileToHandOver(at: record, udid: udid)
-            let rel = source.pairingRemoteRelativePath
-            self.engine.log("Writing the pairing file into \(bundleID) /Documents/\(rel) …")
-            let written = try self.connection.writeFile(intoBundleID: bundleID,
-                                                        remoteRelativePath: rel, data: pairing)
-            self.engine.log("Pairing file written into \(appName) on their iPhone and read back VERIFIED (\(written) bytes).")
-            self.handOffSplitPairing(pairing, bundleID: bundleID, appName: appName, home: home, udid: udid)
-            self.handOffAnisette(bundleID: bundleID, appName: appName, home: home)
-            if let certificate {
-                self.handOffCertificate(certificate, bundleID: bundleID, appName: appName, home: home)
-            }
-        }
-    }
-
-    /// Puts their RPPairing record into AltStore on their iPhone, where
-    /// AltServer puts it (`AltStorePairingHandoff`), so setting up its Remote
-    /// AltServer skips pairing. AltStore pairs during that setup instead
-    /// (`altStorePairsItself`) when the pairing is a lockdown record only,
-    /// which it can't connect with, or the file couldn't be written, which
-    /// doesn't stop the run: as on the Install tab, AltStore works without it.
-    @MainActor
-    private func handOffToAltStore(ip: String, record: String, bundleID: String) async throws {
-        let pairing = try Data(contentsOf: URL(fileURLWithPath: record))
-        guard let rpRecord = AltStorePairingHandoff.record(from: pairing) else {
-            altStorePairsItself = true
-            engine.log("Their pairing is a lockdown record only, which AltStore can't connect with, so none was written. Setting up AltStore's Remote AltServer pairs it instead.")
-            return
-        }
-        do {
-            try await onDeviceQueue {
-                try self.reconnectIfNeeded(ip: ip, record: record)
-                let rel = AltStorePairingHandoff.remoteRelativePath
-                self.engine.log("Writing the RPPairing record into \(bundleID) /Documents/\(rel) …")
-                let written = try self.connection.writeFile(intoBundleID: bundleID,
-                                                            remoteRelativePath: rel, data: rpRecord)
-                self.engine.log("Pairing file written into AltStore on their iPhone and read back VERIFIED (\(written) bytes). Setting up its Remote AltServer skips pairing.")
-            }
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
-            altStorePairsItself = true
-            engine.log("⚠️ Couldn't put the pairing file into AltStore on their iPhone (\(short(error))). It's installed: setting up its Remote AltServer pairs it instead.")
-        }
-    }
-
-    /// Where SideInstaller keeps its pairing file (`PrivateStore.pairingFile`)
-    /// and the merged file it builds from it (`PrivateStore.combinedPairingFile`),
-    /// relative to its container. Release 1.6.5 keeps them there too.
-    private static let sideInstallerPairingPath = "Library/Application Support/rp_pairing_file.plist"
-    private static let sideInstallerMergedPath = "Library/Application Support/combined_pairing_file.plist"
-    /// The name SideInstaller shows the handed-over file under, as it shows a
-    /// picked file's (and “SideStore.plist” for the one SideStore sends).
-    static let handedOverPairingName = "SideBySide.plist"
-
-    /// Hands SideInstaller on their iPhone the pair record as an imported
-    /// pairing file, left as its own import (`Engine.importPairingFile`) leaves
-    /// one: the record where it keeps its pairing file, replacing any there,
-    /// the merged file built from an older one deleted, and the file's name
-    /// under `Engine.importedPairingNameKey`. It then connects with it from the
-    /// first launch, on any iOS it runs on, without pairing itself, and the
-    /// mark has it ask for Local Network first, as an imported file needs.
-    ///
-    /// Written into Application Support itself, not Documents: at launch
-    /// SideInstaller moves a pairing file from Documents only when it has none,
-    /// and deletes it otherwise. Only the record is required; the rest only
-    /// logs. Nothing when their iPhone can't use the record (`pairingLeftOutOn`).
-    @MainActor
-    private func handOffToSideInstaller(ip: String, record: String, bundleID: String) async throws {
-        if let version = pairingLeftOutOn {
-            engine.log("Not handing SideInstaller the pairing: their iPhone runs iOS \(version), where lockdownd hangs up on a lockdown record that comes through LocalDevVPN.")
-            return
-        }
-        let udid = targetUDID
-        try await onDeviceQueue {
-            try self.reconnectIfNeeded(ip: ip, record: record)
-            let pairing = try Self.pairingFileToHandOver(at: record, udid: udid)
-            let path = Self.sideInstallerPairingPath
-            let written = try self.connection.writeFile(intoBundleID: bundleID, containerPath: path, data: pairing)
-            self.engine.log("Pairing file written into SideInstaller on their iPhone (/\(path), \(written) bytes, read back VERIFIED).")
-            do {
-                try self.connection.removeFile(inBundleID: bundleID, containerPath: Self.sideInstallerMergedPath)
-            } catch {
-                self.engine.log("⚠️ Couldn't delete the merged pairing file an earlier SideInstaller left (\(self.short(error))). It may hand other apps the older pairing until it pairs again.")
-            }
-            let prefsPath = "Library/Preferences/\(bundleID).plist"
-            do {
-                try self.connection.updatePlist(inBundleID: bundleID, containerPath: prefsPath) { prefs in
-                    prefs[Engine.importedPairingNameKey] = Self.handedOverPairingName
-                }
-                self.engine.log("Marked it as the imported pairing file “\(Self.handedOverPairingName)” (/\(prefsPath)), as SideInstaller's own import does.")
-            } catch {
-                self.engine.log("⚠️ Couldn't mark the pairing file as imported (\(self.short(error))). SideInstaller still connects with it; on iOS 27 it may pair itself instead.")
-            }
-        }
-    }
-
-    /// Opens the link again if iOS dropped it while the app installed. Runs on
-    /// `deviceQueue`.
-    private func reconnectIfNeeded(ip: String, record: String) throws {
-        guard !connection.isConnected else { return }
-        try connection.connect(deviceIP: ip, pairingFilePath: record, allowLockdownMinting: false)
-    }
-
-    /// The pair record as the app on their iPhone reads it: an XML plist, since
-    /// SideStore reads the file as text, and a lockdown record with their UDID
-    /// in it, which the `Pair` answer leaves out and minimuxer needs. An
-    /// RPPairing record goes as it is, as the Install tab hands one over.
-    private static func pairingFileToHandOver(at path: String, udid: String?) throws -> Data {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        let kind = PairingFileKind.of(data: data)
-        guard kind.isUsable,
-              var dict = (try PropertyListSerialization.propertyList(from: data, options: [],
-                                                                     format: nil)) as? [String: Any]
-        else { throw EngineError.message(L("No pair record for their iPhone.")) }
-        if kind.hasLockdown, let udid, !udid.isEmpty, (dict["UDID"] as? String)?.isEmpty != false {
-            dict["UDID"] = udid
-        }
-        return try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
-    }
-
-    /// Hands the pairing over the way SideStore nightlies from 20 September
-    /// 2026 on read it, as `Engine.handOffSplitPairing` does: one file per
-    /// protocol, and the two settings its own import writes. Runs on
-    /// `deviceQueue`; failures only log.
-    private func handOffSplitPairing(_ pairing: Data, bundleID: String, appName: String,
-                                     home: SideStoreHome, udid: String?) {
-        do {
-            let records = try SideStorePairingHandoff.split(pairing, udid: udid)
-            if !records.missingLockdownKeys.isEmpty {
-                engine.log("⚠️ The lockdown record lacks \(records.missingLockdownKeys.joined(separator: ", ")), which newer SideStore builds require, so it stays out of their files.")
-            }
-            guard let active = records.activeProtocol else {
-                engine.log("⚠️ Nothing in the pairing file that newer \(appName) builds can load.")
-                return
-            }
-            for (name, data) in [(SideStorePairingHandoff.lockdownFileName, records.lockdown),
-                                 (SideStorePairingHandoff.remoteFileName, records.remote)] {
-                guard let data else { continue }
-                let rel = home.documentsPrefix + name
-                let written = try connection.writeFile(intoBundleID: bundleID,
-                                                       remoteRelativePath: rel, data: data)
-                engine.log("Wrote /Documents/\(rel) into \(appName) (\(written) bytes, read back VERIFIED).")
-            }
-            let prefsPath = home.preferencesPath(hostBundleID: bundleID)
-            try connection.updatePlist(inBundleID: bundleID, containerPath: prefsPath) { prefs in
-                SideStorePairingHandoff.applySettings(to: &prefs, activeProtocol: active)
-            }
-            engine.log("Set \(appName) to load its \(active) pairing file (/\(prefsPath)), as its own import does.")
-        } catch {
-            engine.log("⚠️ Couldn't hand \(appName) its pairing in the newer format (\(short(error))). SideStore nightlies from 20 September 2026 on may ask for the pairing file; older builds are set.")
-        }
-    }
-
-    /// Sets SideStore up to sign in the way its users got past Apple's -80046
-    /// and HTTP 503s, as `Engine.handOffSideStoreAnisette` does. Runs on
-    /// `deviceQueue`; failures only log.
-    private func handOffAnisette(bundleID: String, appName: String, home: SideStoreHome) {
-        let prefsPath = home.preferencesPath(hostBundleID: bundleID)
-        do {
-            var changes: [String] = []
-            try connection.updatePlist(inBundleID: bundleID, containerPath: prefsPath) { prefs in
-                changes = SideStoreAnisetteHandoff.applySettings(to: &prefs)
-            }
-            guard !changes.isEmpty else { return }
-            engine.log("Set \(appName)'s anisette the way SideStore's users get past Apple's -80046 and HTTP 503s: \(changes.joined(separator: ", ")) (/\(prefsPath)).")
-        } catch {
-            engine.log("⚠️ Couldn't set \(appName)'s anisette settings (\(short(error))). If its sign-in fails with -80046 or HTTP 503, turn off On-device Anisette and Auto Rotation in its settings, pick “SideStore (New)”, and set its client info to say “Mac OS X” where it says “macOS”.")
-        }
-    }
-
-    /// The signing certificate as SideStore's `Account.sideconf`, so its first
-    /// sign-in with the same Apple ID reuses it instead of asking to resign
-    /// itself, as on the Install tab. Not for an Apple ID saved on this iPhone:
-    /// the file carries the certificate's private key, which would stay on
-    /// their iPhone. Nil, with the reason logged, when nothing is handed over.
-    @MainActor
-    private func certificateHandOff(for app: SideBySideApp, appleID: String) async -> String? {
-        guard let session = signSession, let signed = signedAppPath else { return nil }
-        if AccountStore.shared.isSaved(appleID) {
-            engine.log("Not handing \(app.displayName) the signing certificate: it belongs to an Apple ID saved on this iPhone, and its private key shouldn't stay on theirs. \(app.displayName) asks to resign itself the first time it signs in.")
-            return nil
-        }
-        guard Self.importsAccountConfigSilently(signedApp: signed) else {
-            engine.log("This SideStore build asks for a file password before importing Account.sideconf, so nothing is handed over, the same as iLoader. It offers to resign itself on first sign-in instead.")
-            return nil
-        }
-        do {
-            return try await onSignQueue { try Self.accountConfig(session: session) }
-        } catch {
-            engine.log("⚠️ Couldn't build the certificate hand-off (\(short(error))). SideStore will ask to resign itself on first sign-in.")
-            return nil
-        }
-    }
-
-    /// Writes `config` where SideStore imports it on first launch, then deletes
-    /// it. Runs on `deviceQueue`; failures only log.
-    private func handOffCertificate(_ config: String, bundleID: String, appName: String, home: SideStoreHome) {
-        let rel = home.documentsPrefix + "Account.sideconf"
-        do {
-            let written = try connection.writeFile(intoBundleID: bundleID, remoteRelativePath: rel,
-                                                   data: Data(config.utf8))
-            engine.log("Certificate handed to \(appName): /Documents/\(rel) written and read back VERIFIED (\(written) bytes). SideStore imports and deletes it on first launch.")
-        } catch {
-            engine.log("⚠️ Couldn't hand \(appName) the signing certificate (\(short(error))). It's installed and ready, but will ask to resign itself on first sign-in.")
-        }
-    }
-
-    private static func accountConfig(session: OpaquePointer) throws -> String {
-        var json: UnsafeMutablePointer<CChar>?
-        var error: UnsafeMutablePointer<CChar>?
-        let rc = si_account_config(session, &json, &error)
-        guard rc == 0 else {
-            let message = error.map { String(cString: $0) } ?? "rc=\(rc)"
-            error.map { si_string_free($0) }
-            throw EngineError.message(message)
-        }
-        let payload = json.map { String(cString: $0) } ?? ""
-        json.map { si_string_free($0) }
-        guard !payload.isEmpty else { throw EngineError.message("empty account config") }
-        return payload
-    }
-
-    /// String found only in SideStore builds whose account importer asks for
-    /// a password (`Engine.promptingImporterMarker`).
-    private static let promptingImporterMarker = Data("acctFileChecksum".utf8)
-
-    /// Whether the signed SideStore imports `Account.sideconf` without asking
-    /// for a password, as `Engine.importsAccountConfigSilently` checks: by
-    /// looking for the prompting importer in its binary.
-    private static func importsAccountConfigSilently(signedApp app: String) -> Bool {
-        let framework = (app as NSString).appendingPathComponent("Frameworks/SideStoreApp.framework")
-        guard let exec = sideStoreExecutable(inBundle: framework) ?? sideStoreExecutable(inBundle: app),
-              let binary = try? Data(contentsOf: URL(fileURLWithPath: exec), options: .mappedIfSafe)
-        else { return false }
-        return binary.range(of: promptingImporterMarker) == nil
-    }
-
-    private static func sideStoreExecutable(inBundle path: String) -> String? {
-        let plistPath = (path as NSString).appendingPathComponent("Info.plist")
-        guard let data = FileManager.default.contents(atPath: plistPath),
-              let plist = (try? PropertyListSerialization.propertyList(from: data, options: [],
-                                                                       format: nil)) as? [String: Any],
-              let id = plist["CFBundleIdentifier"] as? String,
-              id.hasPrefix("com.SideStore.SideStore"),
-              let name = plist["CFBundleExecutable"] as? String
-        else { return nil }
-        let exec = (path as NSString).appendingPathComponent(name)
-        return FileManager.default.fileExists(atPath: exec) ? exec : nil
-    }
-
     // MARK: - Helpers
+
+    /// Anisette addresses to try, in the engine's order.
+    private func anisetteCandidates() -> [String] {
+        engine.anisetteCandidates()
+    }
 
     private static func tidy(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1842,13 +876,6 @@ final class SideBySideManager: ObservableObject {
         let octets = value.split(separator: ".", omittingEmptySubsequences: false)
         guard octets.count == 4 else { return false }
         return octets.allSatisfy { UInt8($0) != nil }
-    }
-
-    /// True when `version` ("26.4.1") is `major`.`minor` or later.
-    static func version(_ version: String, isAtLeast major: Int, _ minor: Int = 0) -> Bool {
-        let parts = version.split(separator: ".").map { Int($0) ?? 0 }
-        let have = (parts.first ?? 0, parts.count > 1 ? parts[1] : 0)
-        return have.0 != major ? have.0 > major : have.1 >= minor
     }
 
     /// Moves the file at `path` to `destination`, replacing anything there, and
@@ -1889,381 +916,97 @@ final class SideBySideManager: ObservableObject {
     }
 }
 
+// MARK: - C 2FA callback
+
+/// Bridges a 2FA request during a Side by Side sign-in to the engine's shared
+/// prompt, which `RootView` presents over whichever tab is showing.
+private let sideBySideTwoFactorCallback: SITwoFactorCb = { _, request, outBuf, bufLen in
+    Engine.shared.answerTwoFactor(request: request, outBuf: outBuf, len: Int(bufLen))
+}
+
 // MARK: - View
 
-/// Side by Side, one page at a time: a welcome, what to install, the Apple
-/// ID, getting their iPhone ready, then the run, with what
-/// their iPhone asks for shown as it comes up, and what's left on their side
-/// once it's done. Pushed from Tools, whose `NavigationStack` this relies on.
+/// Installs SideInstaller onto somebody else's iPhone across the Wi-Fi network.
+/// Pushed from Tools, whose `NavigationStack` this relies on.
 struct SideBySideView: View {
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
-    /// Read for Wi-Fi and the install step's progress, which installd reports
-    /// globally.
-    @Environment(Engine.self) private var engine
-    /// Observed so the Apple ID choice follows the saved account.
+    /// Read for the install step's progress, which installd reports globally.
+    @EnvironmentObject private var engine: Engine
+    /// Observed so the "use my saved Apple ID" button follows the saved account.
     @EnvironmentObject private var accounts: AccountStore
     @ObservedObject var manager: SideBySideManager
 
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case address, email, password }
-    private typealias Stage = SideBySideManager.Stage
-
-    /// The scroll position each page starts from.
-    private static let top = "top"
 
     var body: some View {
-        ScrollViewReader { scroller in
-            ScrollView {
-                VStack(spacing: 0) {
-                    Color.clear.frame(height: 0).id(Self.top)
-                    // Pages overlap while one gives way to the next.
-                    ZStack(alignment: .top) {
-                        page(for: manager.stage)
-                            .id(manager.stage)
-                            .transition(pageTransition)
-                    }
-                }
-                .padding(20)
-                .pageColumn()
+        ScrollView {
+            VStack(spacing: 18) {
+                header.cascadeItem(0)
+                targetCard.cascadeItem(1)
+                accountCard.cascadeItem(2)
+                stepsCard.cascadeItem(3)
+                actionButton.cascadeItem(4)
+                // The pairing steps and code, errors and success show as
+                // `SideBySidePopup`, which `RootView` lays over the app.
             }
-            .onChange(of: manager.stage) { _, _ in
-                focus = nil
-                showsAddressProblem = false
-                withAnimation(.smooth(duration: 0.3)) { scroller.scrollTo(Self.top, anchor: .top) }
-            }
+            .padding(20)
+            .pageColumn()
+            .animation(.smooth(duration: 0.35), value: manager.targetSummary)
+            .animation(.smooth(duration: 0.3), value: manager.isRunning)
+            .animation(.smooth(duration: 0.4, extraBounce: 0.12), value: manager.finished)
         }
-        .animation(.smooth(duration: 0.4), value: manager.stage)
         .background(AppBackground())
         .scrollDismissesKeyboard(.interactively)
-        .alert(L("Cancel the install?"), isPresented: $confirmingCancel) {
-            Button(L("Yes"), role: .destructive) { manager.cancel() }
-            Button(L("No"), role: .cancel) { }
-        }
-        .onChange(of: manager.isRunning) { _, running in
-            // A run that ended by itself leaves nothing to cancel.
-            if !running { confirmingCancel = false }
-        }
-        // What the run needs from them, and how it ended, as the other pages'
-        // popups sound.
-        .onChange(of: manager.pairingInSettings) { _, waiting in
-            if waiting { SoundEffects.play(.attention) }
-        }
-        .onChange(of: manager.pairingPIN) { old, pin in
-            if pin != nil, old == nil { SoundEffects.play(.attention) }
-        }
-        .onChange(of: manager.waitingForTrust) { _, waiting in
-            if waiting { SoundEffects.play(.attention) }
-        }
-        .onChange(of: manager.finished) { _, done in
-            if done { SoundEffects.play(.success) }
-        }
-        .onChange(of: manager.lastError) { _, error in
-            if error != nil { SoundEffects.play(.error) }
-        }
     }
 
-    // MARK: Pages
+    // MARK: Header
 
-    @ViewBuilder
-    private func page(for stage: Stage) -> some View {
-        switch stage {
-        case .welcome: welcomePage
-        case .app:     appPage
-        case .address: addressPage
-        case .account: accountPage
-        case .ready:   readyPage
-        case .run:
-            ZStack(alignment: .top) {
-                if manager.finished {
-                    donePage.transition(.opacity)
-                } else {
-                    runPage.transition(.opacity)
-                }
-            }
-            .animation(.smooth(duration: 0.45), value: manager.finished)
-        }
-    }
-
-    /// The setup steps' own pages: pushed in from the side they're headed.
-    private var pageTransition: AnyTransition {
-        let shift: CGFloat = manager.movingForward ? 36 : -36
-        return .asymmetric(insertion: .opacity.combined(with: .offset(x: shift)),
-                           removal: .opacity.combined(with: .offset(x: -shift)))
-    }
-
-    /// The setup pages step back one at a time, so the bar's own Back to Tools
-    /// gives way to theirs. A run in flight has neither.
-    private var showsPageBack: Bool {
-        !manager.isRunning && manager.stage.number != nil
-    }
-
-    private var hidesSystemBack: Bool {
-        manager.isRunning || manager.stage.number != nil
-    }
-
-    // MARK: Welcome
-
-    private var welcomePage: some View {
-        VStack(spacing: 16) {
-            BrandHeader(icon: "iphone.gen3.radiowaves.left.and.right",
-                        image: "SideBySideLogo",
-                        title: L("Side by Side"),
-                        subtitle: L("Set up someone else's iPhone")) {
-                StatusDot(text: L("Same Wi-Fi network"), color: .secondary, idle: true)
-            }
-            .cascadeItem(0)
-
-            if manager.remembersTheirIPhone {
-                rememberedCard.cascadeItem(1)
-            }
-
-            Button { manager.go(to: .app) } label: { continueLabel(L("Get started")) }
-                .buttonStyle(PrimaryButtonStyle())
-                .cascadeItem(2)
-        }
-    }
-
-    /// A pairing kept from a run that stopped, which Clear forgets.
-    private var rememberedCard: some View {
-        PanelCard {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "link")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(L("This iPhone is still paired with theirs. Clearing forgets it."))
-                        .font(.footnote)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(L("Clear their details")) { manager.clear() }
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(Theme.accent)
-                        .buttonStyle(.plain, sound: .tap)
-                }
+    private var header: some View {
+        BrandHeader(icon: "iphone.gen3.radiowaves.left.and.right",
+                    image: "SideBySideLogo",
+                    title: L("Side by Side"),
+                    beta: true,
+                    subtitle: L("Set up someone else's iPhone"),
+                    animateIcon: manager.isRunning) {
+            if let summary = manager.targetSummary {
+                StatusPill(text: summary, systemImage: "iphone", color: .green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
+            } else {
+                StatusPill(text: L("Same Wi-Fi network"), systemImage: "wifi", color: .secondary, glass: true)
             }
         }
     }
 
-    // MARK: 1. What to install
+    // MARK: Their iPhone
 
-    private var appPage: some View {
-        VStack(spacing: 16) {
-            stageHeader(.app,
-                        title: L("What should go on their iPhone?"),
-                        subtitle: L("Pick one. You can come back for another one later."))
-                .cascadeItem(0)
-            VStack(spacing: 12) {
-                ForEach(Array(SideBySideApp.builtIn.enumerated()), id: \.element) { index, app in
-                    AppChoiceCard(app: app, detail: app.requirement,
-                                  selected: manager.app == app) {
-                        manager.app = app
-                    }
-                    .cascadeItem(index + 1)
-                }
-            }
-            // AltStore has one channel, so nothing to pick.
-            if let source = manager.app.source, source.channels(stableReleased: true).count > 1 {
-                channelCard.transition(.cardAppear)
-            } else if manager.app == .custom {
-                customIPACard.transition(.cardAppear)
-            }
-            Button { manager.go(to: .address) } label: { continueLabel(L("Continue")) }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(manager.app == .custom && manager.customIPA == nil)
-                .cascadeItem(SideBySideApp.builtIn.count + 1)
-            if manager.app != .custom {
-                customIPALink
-                    .transition(.opacity)
-                    .cascadeItem(SideBySideApp.builtIn.count + 2)
-            }
-        }
-        .animation(.smooth(duration: 0.3), value: manager.app)
-        .animation(.smooth(duration: 0.3), value: manager.customIPA)
-        .animation(.smooth(duration: 0.3), value: manager.importError)
-    }
-
-    /// Small grey text under Continue that picks an IPA from Files instead,
-    /// and says why the last pick didn't take.
-    private var customIPALink: some View {
-        VStack(spacing: 4) {
-            Button { showImporter = true } label: {
-                HStack(spacing: 8) {
-                    if manager.isImportingIPA { ProgressView().controlSize(.mini) }
-                    Text(manager.isImportingIPA ? L("Importing…") : L("Use a custom .ipa instead"))
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain, sound: .tap)
-            .disabled(manager.isImportingIPA)
-            if let error = manager.importError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(Theme.warning)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    /// The picked IPA, a button to pick another, and what's done with it.
-    private var customIPACard: some View {
+    private var targetCard: some View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    AppGlyph(app: .custom, size: 40)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(manager.customIPA.map { [$0.name, $0.version].compactMap { $0 }.joined(separator: " ") }
-                             ?? SideBySideApp.custom.displayName)
-                            .font(.headline)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
-                        if manager.customIPA != nil {
-                            Text(SideBySideApp.custom.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Button { showImporter = true } label: {
-                    HStack(spacing: 8) {
-                        if manager.isImportingIPA {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: manager.customIPA == nil
-                                  ? "square.and.arrow.down" : "checkmark.circle")
-                                .contentTransition(.symbolEffect(.replace))
-                                .foregroundStyle(manager.customIPA == nil ? Color.secondary : Theme.accent)
-                        }
-                        Text(manager.isImportingIPA ? L("Importing…")
-                             : manager.customIPA?.file.lastPathComponent ?? L("Import .ipa"))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        if manager.customIPA != nil, !manager.isImportingIPA {
-                            Text(L("Replace"))
-                                .font(.footnote.weight(.medium))
-                                .foregroundStyle(Theme.accent)
-                        }
-                    }
-                    .fieldBackground()
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain, sound: .tap)
-                .disabled(manager.isImportingIPA)
-
-                if let error = manager.importError {
-                    Label(error, systemImage: "exclamationmark.triangle")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .transition(.opacity)
-                } else if let picked = manager.customIPA {
-                    Text(picked.build.map {
-                        L("SideInstaller recognizes this as %@ and sets it up just like its own download.", $0.displayName)
-                    } ?? L("Signed with the Apple ID and installed as it is, without a pairing file."))
-                        .font(.footnote)
+                sectionTitle(L("Their iPhone"), systemImage: "iphone")
+                // Their iPhone needs iOS 27+ so the installed app can pair itself.
+                // This can't be checked before the run.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(L("Their iPhone needs iOS %@ — SideInstaller pairs itself once it's installed, and nothing older can.",
+                           Engine.minimumOSText))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                        .transition(.opacity)
                 }
-            }
-        }
-    }
-
-    /// Stable or Nightly, for the SideStore builds, as on the Install tab.
-    private var channelCard: some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 12) {
-                sectionTitle(L("Release"), systemImage: "tag")
-                Picker(L("Release"), selection: $manager.channel) {
-                    ForEach(ReleaseChannel.allCases) { channel in
-                        Text(channel.displayName).tag(channel)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-        }
-    }
-
-    // MARK: 2. Their address
-
-    private var addressPage: some View {
-        VStack(spacing: 16) {
-            stageHeader(.address,
-                        title: L("Do you have the device's IP?"),
-                        subtitle: L("Optional"))
-                .cascadeItem(0)
-
-            VStack(spacing: 12) {
-                OptionRow(symbol: "network",
-                          title: L("Yes"),
-                          detail: L("SideInstaller asks their iPhone to pair directly. Needed below iOS 27."),
-                          selected: manager.knowsAddress,
-                          wrapsDetail: true) {
-                    manager.knowsAddress = true
-                }
-                OptionRow(symbol: "gearshape",
-                          title: L("No"),
-                          detail: L("Their iPhone pairs from its own Settings, which needs iOS 27."),
-                          selected: !manager.knowsAddress,
-                          wrapsDetail: true) {
-                    focus = nil
-                    manager.knowsAddress = false
-                }
-            }
-            .cascadeItem(1)
-
-            if manager.knowsAddress {
-                addressCard.transition(.cardAppear)
-            }
-
-            Button(action: continueFromAddress) { continueLabel(L("Continue")) }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(!addressReady)
-                .animation(.smooth(duration: 0.2), value: addressReady)
-                .cascadeItem(2)
-        }
-        .onChange(of: manager.targetIP) { _, _ in showsAddressProblem = false }
-        .onChange(of: manager.knowsAddress) { _, knows in
-            showsAddressProblem = false
-            // Into the field once it has slid in.
-            guard knows, manager.targetIP.isEmpty else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if manager.knowsAddress, manager.stage == .address { focus = .address }
-            }
-        }
-        .animation(.smooth(duration: 0.3), value: manager.knowsAddress)
-        .animation(.smooth(duration: 0.25), value: showsAddressProblem)
-    }
-
-    /// The field for their address, shown under Yes.
-    private var addressCard: some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 12) {
-                TextField(L("IP address"), text: $manager.targetIP)
+                .font(.caption)
+                TextField(L("IP address (optional)"), text: $manager.targetIP)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     // Not `.decimalPad`: its separator is a comma in many regions.
                     .keyboardType(.numbersAndPunctuation)
                     .textFieldStyle(.plain)
-                    .submitLabel(.continue)
                     .focused($focus, equals: .address)
-                    .onSubmit(continueFromAddress)
+                    .disabled(manager.isRunning)
                     .fieldBackground()
-                if showsAddressProblem, let problem = manager.addressProblem {
-                    Label(problem, systemImage: "exclamationmark.circle")
-                        .font(.footnote)
-                        .foregroundStyle(Theme.negative)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .transition(.opacity)
-                }
-                Text(addressHint)
+                Text(hint)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2271,417 +1014,75 @@ struct SideBySideView: View {
         }
     }
 
-    /// Under Yes, Continue waits for an address.
-    private var addressReady: Bool {
-        !manager.knowsAddress || !manager.targetIP.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
-    /// How to find their address, with this iPhone's as an example.
-    private var addressHint: String {
+    /// That their IP is optional, how to find it, and this iPhone's address as
+    /// an example.
+    private var hint: String {
+        let optional = L("Optional: leave it empty, and it fills in when their iPhone pairs.")
         let route = L("On their iPhone: Settings › Wi-Fi › ⓘ next to the network, then “IP Address”.")
-        guard let own = manager.ownWiFiAddress else { return route }
-        return route + " " + L("This iPhone is %@, so theirs will look similar.", own)
+        guard let own = manager.ownWiFiAddress else { return optional + " " + route }
+        return optional + " " + route + " " + L("This iPhone is %@, so theirs will look similar.", own)
     }
 
-    private func continueFromAddress() {
-        guard addressReady else { return }
-        guard manager.addressProblem == nil else {
-            showsAddressProblem = true
-            SoundEffects.play(.error)
-            return
-        }
-        focus = nil
-        manager.go(to: .account)
-    }
+    // MARK: The Apple ID
 
-    // MARK: 3. The Apple ID
-
-    private var accountPage: some View {
-        VStack(spacing: 16) {
-            stageHeader(.account,
-                        title: L("Which Apple ID signs it?"),
-                        subtitle: L("The app is signed with it, and needs it again every 7 days to keep opening. Use the iPhone owner's."))
-                .cascadeItem(0)
-
-            if let saved = accounts.active {
-                VStack(spacing: 12) {
-                    OptionRow(symbol: "person.2",
-                              title: L("Their Apple ID"),
-                              detail: L("Recommended: they keep their apps signed with it."),
-                              selected: !manager.usesSavedAccount) {
-                        manager.usesSavedAccount = false
-                    }
-                    OptionRow(symbol: "person.crop.circle",
-                              title: L("My Apple ID"),
-                              detail: saved.normalized,
-                              selected: manager.usesSavedAccount) {
-                        focus = nil
-                        manager.usesSavedAccount = true
-                    }
-                }
-                .cascadeItem(1)
-            }
-
-            if manager.signsWithSavedAccount {
-                PanelCard {
-                    Label {
-                        Text(L("Only if you'll keep their apps signed yourself: they won't have this Apple ID's password."))
-                            .font(.footnote)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle")
-                            .foregroundStyle(Theme.warning)
-                    }
-                }
-                .transition(.cardAppear)
-            } else {
-                credentialsCard
-                    .cascadeItem(2)
-                    .transition(.cardAppear)
-            }
-
-            Button(action: continueFromAccount) { continueLabel(L("Continue")) }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(!manager.hasCredentials)
-                .animation(.smooth(duration: 0.2), value: manager.hasCredentials)
-                .cascadeItem(3)
-        }
-        .animation(.smooth(duration: 0.3), value: manager.signsWithSavedAccount)
-    }
-
-    private var credentialsCard: some View {
+    private var accountCard: some View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
+                sectionTitle(L("Apple ID to sign with"), systemImage: "person.crop.circle")
                 TextField(L("Email"), text: $manager.appleID)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.emailAddress)
-                    // No `.username`/`.password` content types here: these are
-                    // someone else's credentials, so don't offer to save them
-                    // to the keychain.
+                    // No `.username`/`.password` content types on this card:
+                    // these are someone else's credentials, so don't offer to
+                    // save them to the keychain.
                     .textFieldStyle(.plain)
                     .submitLabel(.next)
                     .focused($focus, equals: .email)
                     .onSubmit { focus = .password }
+                    .disabled(manager.isRunning)
                     .fieldBackground()
                 SecureField(L("Password"), text: $manager.password)
                     .textFieldStyle(.plain)
-                    .submitLabel(.continue)
+                    .submitLabel(.done)
                     .focused($focus, equals: .password)
-                    .onSubmit(continueFromAccount)
+                    .disabled(manager.isRunning)
                     .fieldBackground()
-                VStack(alignment: .leading, spacing: 8) {
-                    CheckRow(symbol: "lock", text: L("Used for this install only, and never saved."))
-                    CheckRow(symbol: "bell.badge",
-                             text: L("Apple may send a code to their devices, so keep their iPhone close."))
-                }
-                .padding(.top, 2)
-            }
-        }
-    }
-
-    private func continueFromAccount() {
-        guard manager.hasCredentials else { return }
-        focus = nil
-        manager.go(to: .ready)
-    }
-
-    // MARK: 4. Their iPhone, ready
-
-    private var readyPage: some View {
-        VStack(spacing: 16) {
-            stageHeader(.ready,
-                        title: L("Get their iPhone ready"),
-                        subtitle: L("Do this on their iPhone, then start."))
-                .cascadeItem(0)
-
-            PanelCard {
-                NumberedSteps(steps: [
-                    L("Connect their iPhone to the same Wi-Fi network as this one."),
-                    L("Turn on Developer Mode under Settings › Privacy & Security › Developer Mode, and confirm it after the restart."),
-                    L("Unlock their iPhone and keep it next to this one."),
-                ])
-            }
-            .cascadeItem(1)
-
-            PanelCard {
-                VStack(spacing: 16) {
-                    summaryRow(L("Install"), value: appSummary, symbol: "square.grid.2x2", edit: .app)
-                    hairline
-                    summaryRow(L("Their iPhone"), value: addressSummary, symbol: "iphone", edit: .address)
-                    hairline
-                    summaryRow(L("Apple ID to sign with"), value: manager.credentials?.id ?? L("None"),
-                               symbol: "person.crop.circle", edit: .account)
-                }
-            }
-            .cascadeItem(2)
-
-            if !engine.wifiConnected {
-                PanelCard {
-                    Label {
-                        Text(L("Wi-Fi is off. Both iPhones have to be on the same Wi-Fi network for this to work."))
-                            .font(.footnote)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "wifi.slash").foregroundStyle(Theme.warning)
-                    }
-                }
-                .transition(.cardAppear)
-            }
-            if let problem = manager.lastError, !manager.isRunning {
-                PanelCard { ErrorMessage(message: problem) }
-                    .transition(.cardAppear)
-            }
-
-            Button {
-                focus = nil
-                manager.start()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "iphone.and.arrow.forward")
-                    Text(L("Start the install"))
-                }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            .cascadeItem(3)
-        }
-        .animation(.smooth(duration: 0.35), value: engine.wifiConnected)
-        .animation(.smooth(duration: 0.35), value: manager.lastError)
-    }
-
-    private var appSummary: String {
-        if manager.app == .custom { return manager.customIPA?.name ?? manager.app.displayName }
-        // A build with one channel (AltStore) has none to name.
-        guard let source = manager.app.source, source.channels(stableReleased: true).count > 1 else {
-            return manager.app.displayName
-        }
-        return "\(manager.app.displayName) · \(manager.channel.displayName)"
-    }
-
-    private var addressSummary: String {
-        manager.typedAddress ?? L("Pairs from its Settings")
-    }
-
-    /// One line of the summary, which opens its page to change it.
-    private func summaryRow(_ label: String, value: String, symbol: String, edit stage: Stage) -> some View {
-        Button { manager.go(to: stage) } label: {
-            HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-                    .frame(width: 24)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(value)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Text(L("Edit"))
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain, sound: .tap)
-    }
-
-    private var hairline: some View {
-        Rectangle()
-            .fill(Theme.hairline)
-            .frame(height: 1)
-    }
-
-    // MARK: The run
-
-    private var runPage: some View {
-        VStack(spacing: 16) {
-            runHeader.cascadeItem(0)
-            if manager.isRunning {
-                if manager.pairingInSettings || manager.pairingPIN != nil {
-                    pairingCard.transition(.cardAppear)
-                } else if manager.waitingForTrust {
-                    trustCard.transition(.cardAppear)
-                }
-            }
-            if !manager.isRunning, let message = manager.lastError {
-                failureCard(message).transition(.cardAppear)
-            }
-            progressCard.cascadeItem(1)
-        }
-        .animation(.smooth(duration: 0.35), value: manager.pairingInSettings)
-        .animation(.smooth(duration: 0.35), value: manager.pairingPIN)
-        .animation(.smooth(duration: 0.35), value: manager.waitingForTrust)
-        .animation(.smooth(duration: 0.35), value: manager.isRunning)
-        .animation(.smooth(duration: 0.35), value: manager.targetSummary)
-    }
-
-    private var runHeader: some View {
-        VStack(spacing: 16) {
-            AppGlyph(app: manager.runApp, size: 72)
-            Text(runTitle)
-                .font(.title2.weight(.semibold))
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .contentTransition(.opacity)
-            Group {
-                if let summary = manager.targetSummary {
-                    StatusDot(text: summary, color: Theme.positive)
-                } else {
-                    StatusDot(text: L("Same Wi-Fi network"), color: .secondary, idle: true)
-                }
-            }
-            .transition(.opacity)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 8)
-    }
-
-    private var runTitle: String {
-        if manager.lastError != nil, !manager.isRunning { return L("Install stopped") }
-        return L("Installing %@ on their iPhone", manager.runName)
-    }
-
-    /// What their iPhone asks for while it pairs from Settings: the steps to
-    /// get there, and the code once it wants one. Nothing appears on it by
-    /// itself, so without this the run just looks stuck.
-    private var pairingCard: some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                actionHeader(L("Pair their iPhone in Settings"),
-                             detail: L("Their iPhone won't ask by itself. Pairing starts from its Settings."),
-                             symbol: "lock.iphone")
-                if let pin = manager.pairingPIN {
-                    VStack(spacing: 12) {
-                        PairingCodeDigits(pin: pin)
-                        Text(L("Type this into the prompt on their iPhone."))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 12)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .transition(.opacity)
-                }
-                NumberedSteps(steps: [
-                    L("On their iPhone, open Settings › Privacy & Security › Developer Mode."),
-                    L("Tap “Pair with %@”.", PairingController.peerHostName),
-                    L("Enter their iPhone’s passcode if it asks for it."),
-                    L("Type the code that appears here into the prompt on their iPhone."),
-                ])
-                if manager.pairingPIN == nil {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(L("Waiting for their iPhone…"))
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .transition(.opacity)
-                }
-            }
-        }
-    }
-
-    /// Their iPhone shows a Trust prompt, on an iOS that still pairs that way.
-    private var trustCard: some View {
-        PanelCard {
-            actionHeader(L("Tap Trust on their iPhone"),
-                         detail: L("Unlock their iPhone, then tap Trust in the prompt that comes up."),
-                         symbol: "hand.tap")
-        }
-    }
-
-    private func actionHeader(_ title: String, detail: String, symbol: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.title3)
-                .foregroundStyle(Theme.warning)
-                .frame(width: 28, height: 28)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(detail)
-                    .font(.footnote)
+                Text(L("Tip: Use the iPhone/iPad owner's Apple account credentials"))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var progressCard: some View {
-        let steps = manager.runSteps
-        return PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 8) {
-                    Text(progressTitle)
-                        .font(.headline)
-                        .contentTransition(.opacity)
-                    Spacer(minLength: 4)
-                    Text("\(Int(manager.overallProgress * 100))%")
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(progressTint)
-                        .contentTransition(.numericText(value: manager.overallProgress))
-                        .animation(.smooth(duration: 0.3), value: manager.overallProgress)
-                    if manager.isRunning {
-                        cancelButton
-                            .transition(.opacity)
+                if accounts.active != nil, !manager.isRunning {
+                    Button(L("Use my saved Apple ID instead")) {
+                        manager.appleID = accounts.activeAppleID
+                        manager.password = accounts.activePassword
+                        focus = nil
                     }
-                }
-                InstallProgressBar(progress: manager.overallProgress, tint: progressTint)
-                VStack(spacing: 0) {
-                    ForEach(Array(steps.enumerated()), id: \.element) { index, step in
-                        SideBySideStepRow(title: step.title(for: manager.runApp),
-                                          state: manager.stepStates[step] ?? .pending,
-                                          detail: detail(for: step),
-                                          isLast: index == steps.count - 1)
-                    }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accent)
                 }
             }
         }
     }
 
-    /// The header says the run stopped, so then the card says where.
-    private var progressTitle: String {
-        if manager.isCancelling { return L("Cancelling") }
-        let steps = manager.runSteps
-        if let failed = steps.firstIndex(where: { manager.stepStates[$0] == .failed }) {
-            return L("Step %@ of %@", "\(failed + 1)", "\(steps.count)")
+    // MARK: Steps
+
+    private var stepsCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle(L("Steps"), systemImage: "list.bullet")
+                ForEach(SideBySideStep.allCases) { step in
+                    SideBySideStepRow(title: step.title,
+                                      state: manager.stepStates[step] ?? .pending,
+                                      detail: detail(for: step))
+                }
+                if manager.isRunning || manager.finished {
+                    ProgressView(value: manager.overallProgress)
+                        .tint(Theme.accent)
+                }
+            }
         }
-        return L("Installing")
-    }
-
-    private var runFailed: Bool {
-        manager.stepStates.values.contains(.failed)
-    }
-
-    private var progressTint: Color { runFailed ? Theme.negative : Theme.accent }
-
-    /// The X in the card's corner, which stops the run after asking. It dims
-    /// once the run is stopping, which waits for the step in flight.
-    private var cancelButton: some View {
-        Button {
-            confirmingCancel = true
-        } label: {
-            Image(systemName: "xmark")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Theme.control))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain, sound: .tap)
-        .disabled(manager.isCancelling)
-        .opacity(manager.isCancelling ? 0.4 : 1)
-        .accessibilityLabel(L("Cancel"))
     }
 
     /// The extra line a step carries while it is the one in flight.
@@ -2692,423 +1093,194 @@ struct SideBySideView: View {
         case .connect:
             if manager.pairingPIN != nil { return L("Waiting for them to enter the code…") }
             if manager.pairingInSettings { return L("Waiting for them to pair in Settings…") }
-            if manager.waitingForTrust { return L("Waiting for them to tap Trust…") }
-            return L("Looking for their iPhone…")
+            // `.active` is the tunnel opening once they've paired.
+            return state == .waiting ? L("Waiting for them to tap Trust…") : nil
         case .download:
             return L("%d%% downloaded", Int(manager.downloadProgress * 100))
         case .install:
             return L("%d%% uploaded", Int(engine.installProgress * 100))
-        case .setUp:
-            return L("Handing over the pairing file…")
-        case .signIn, .sign:
+        default:
             return nil
         }
     }
 
-    /// Why the run stopped, and the ways on: again as it was, or with
-    /// something changed. Untitled: the header above says it stopped.
-    private func failureCard(_ message: String) -> some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.title3)
-                        .foregroundStyle(Theme.negative)
-                    Text(message)
-                        .font(.subheadline)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { retryButtons }
-                    VStack(spacing: 12) { retryButtons }
-                }
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { reportButtons(message) }
-                    VStack(alignment: .leading, spacing: 12) { reportButtons(message) }
-                }
-            }
-        }
-    }
+    // MARK: Action
 
     @ViewBuilder
-    private var retryButtons: some View {
-        Button { manager.start() } label: {
-            Label(L("Try again"), systemImage: "arrow.clockwise")
-        }
-        .buttonStyle(PrimaryButtonStyle())
-        Button { manager.editDetails() } label: {
-            Label(L("Change details"), systemImage: "slider.horizontal.3")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
-        .controlSize(.large)
-    }
-
-    /// Report this problem, and Copy logs unless the message says how to fix it.
-    @ViewBuilder
-    private func reportButtons(_ message: String) -> some View {
-        Button { showReport = true } label: {
-            Label(L("Report this problem"), systemImage: "exclamationmark.bubble")
-                .font(.subheadline.weight(.medium))
-        }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
-        if !ErrorHelp.isExplained(message) {
-            CopyLogsButton()
-        }
-    }
-
-    // MARK: Done
-
-    private var donePage: some View {
-        VStack(spacing: 16) {
-            VStack(spacing: 16) {
-                Image(systemName: "checkmark.seal")
-                    .font(.system(size: 48))
-                    .foregroundStyle(Theme.positive)
-                    .frame(height: 72)
-                Text(L("%@ is on their iPhone", manager.installedAppName ?? manager.runName))
-                    .font(.title2.weight(.semibold))
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let summary = manager.targetSummary {
-                    StatusDot(text: summary, color: Theme.positive)
+    private var actionButton: some View {
+        if manager.isRunning {
+            Button(role: .cancel) {
+                manager.cancel()
+            } label: {
+                HStack(spacing: 10) {
+                    ProgressView().tint(.white)
+                    Text(L("Cancel"))
                 }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 8)
-            .cascadeItem(0)
-
-            PanelCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    sectionTitle(L("Finish on their iPhone"), systemImage: "hand.tap")
-                    NumberedSteps(steps: finishSteps)
-                }
-            }
-            .cascadeItem(1)
-
-            if let version = manager.pairingLeftOutOn {
-                PanelCard {
-                    Label {
-                        Text(L("Their iPhone runs iOS %@. From iOS 26.4 on, SideInstaller can't use the pairing their iPhone gives over Wi-Fi, so it needs a pairing file made on a computer.",
-                               version))
-                            .font(.footnote)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle").foregroundStyle(Theme.warning)
+            .buttonStyle(PrimaryButtonStyle(gradient: Theme.gradient(.red), glow: .red))
+        } else {
+            VStack(spacing: 12) {
+                Button {
+                    focus = nil
+                    manager.run()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "iphone.and.arrow.forward")
+                        Text(manager.finished ? L("Install again") : L("Start the install"))
                     }
                 }
-                .cascadeItem(2)
-            }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(!manager.canRun)
+                .opacity(manager.canRun ? 1 : 0.35)
+                .animation(.snappy(duration: 0.25), value: manager.canRun)
 
-            Label(L("This iPhone no longer keeps a pairing with theirs."), systemImage: "lock.shield")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .multilineTextAlignment(.center)
-                .cascadeItem(3)
-
-            VStack(spacing: 16) {
-                Button { manager.finishAndReset() } label: { Text(L("Done")) }
-                    .buttonStyle(PrimaryButtonStyle(sound: .tap))
-                Button(L("Install another app")) { manager.installAnother() }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-                    .buttonStyle(.plain, sound: .tap)
-            }
-            .cascadeItem(4)
-        }
-    }
-
-    /// What's left on their iPhone: trusting the Apple ID, then what the app
-    /// needs before it's ready.
-    private var finishSteps: [String] {
-        var steps = [
-            L("On their iPhone: Settings › General › VPN & Device Management."),
-            L("Tap the Apple ID under “Developer App”, then tap Trust."),
-        ]
-        switch manager.runSetsUp {
-        case nil, .custom?:
-            steps.append(L("Open %@.", manager.installedAppName ?? manager.runName))
-        case .sideInstaller?:
-            steps.append(L("Get LocalDevVPN from the App Store and connect it: SideInstaller works through it."))
-            steps.append(manager.pairingLeftOutOn == nil
-                         ? L("Open SideInstaller. Its pairing file is already in place.")
-                         : L("Open SideInstaller and import a pairing file made on a computer."))
-        case .sideStore?:
-            steps.append(L("Get LocalDevVPN from the App Store and connect it: SideStore works through it."))
-            steps.append(L("Open SideStore and sign in with the same Apple ID. Its pairing file is already in place."))
-        case .liveContainer?:
-            steps.append(L("Get LocalDevVPN from the App Store and connect it: SideStore works through it."))
-            steps.append(L("Open LiveContainer, go to its Settings tab, and tap “Import Certificate From SideStore”."))
-        case .altStore?:
-            steps.append(L("Open AltStore and sign in with the same Apple ID."))
-            steps.append(manager.altStorePairsItself
-                         ? L("To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings and follow its steps.")
-                         : L("To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings. Its pairing file is already in place, so the setup skips pairing."))
-        }
-        return steps
-    }
-
-    // MARK: Pieces
-
-    /// A setup page's heading: where it is in the setup, the question, and why.
-    private func stageHeader(_ stage: Stage, title: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let number = stage.number {
-                HStack(spacing: 8) {
-                    StageDots(current: number, total: Stage.numberedCount)
-                    Text(L("Step %@ of %@", "\(number)", "\(Stage.numberedCount)"))
-                        .font(.caption.weight(.medium))
+                if manager.finished || !manager.appleID.isEmpty || manager.remembersTheirIPhone {
+                    Button(L("Clear their details")) { manager.clear() }
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                    if manager.remembersTheirIPhone {
+                        Text(L("This iPhone is still paired with theirs. Clearing forgets it."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                .accessibilityElement(children: .combine)
             }
-            Text(title)
-                .font(.title2.weight(.semibold))
-                .fixedSize(horizontal: false, vertical: true)
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 4)
     }
 
-    private func continueLabel(_ title: String) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-            Image(systemName: "arrow.right")
-                .font(.subheadline.weight(.semibold))
-        }
-    }
+    // MARK: Helpers
 
     private func sectionTitle(_ title: String, systemImage: String) -> some View {
-        SectionTitle(title: title, systemImage: systemImage)
+        Label {
+            Text(title).font(.headline)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(Theme.brand)
+        }
     }
 }
 
-// MARK: - Pieces
+// MARK: - Popup
 
-/// An app's tile: its own icon, or a symbol on a plain tile.
-private struct AppGlyph: View {
-    let app: SideBySideApp
-    var size: CGFloat = 52
+/// One of Side by Side's popups, which `RootView` stacks over the whole app:
+/// how to pair their iPhone from its Settings and the code it asks for, or how
+/// the run ended. See `SideBySideManager.Popup`.
+struct SideBySidePopup: View {
+    @ObservedObject var manager: SideBySideManager
+    let popup: SideBySideManager.Popup
+
+    /// Observed so labels redraw when the language changes.
+    @EnvironmentObject private var loc: Localizer
 
     var body: some View {
-        Group {
-            if let image = app.image {
-                Image(image).logoArt()
-            } else {
-                ZStack {
-                    Rectangle().fill(Theme.raised)
-                    Image(systemName: app.symbol)
-                        .font(.system(size: size * 0.44))
-                        .foregroundStyle(.secondary)
-                }
+        switch popup {
+        case .pairingCode(let pin):
+            PairingCodePopup(pin: pin, caption: L("Type this into the prompt on their iPhone."),
+                             onClose: close)
+        case .pairInSettings:
+            pairInSettingsPopup
+        case .error(let message):
+            PopupCard(title: L("Something went wrong"),
+                      systemImage: "exclamationmark.triangle.fill",
+                      tint: .red,
+                      onClose: close) {
+                ErrorMessage(message: message)
+            }
+        case .success(let appName):
+            PopupCard(title: L("Last step: they trust %@", appName),
+                      systemImage: "checkmark.seal.fill",
+                      tint: .green,
+                      onClose: close) {
+                NumberedSteps(steps: [
+                    L("On their iPhone: Settings › General › VPN & Device Management."),
+                    L("Tap the Apple ID under “Developer App”, then tap Trust."),
+                    L("Open it from their Home Screen — they're set up."),
+                ])
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 23 / 86, style: .continuous))
-        // The art's dark tile would melt into the page without it.
-        .overlay(RoundedRectangle(cornerRadius: size * 23 / 86, style: .continuous)
-            .strokeBorder(Theme.hairline, lineWidth: 1))
-        .accessibilityHidden(true)
-    }
-}
-
-/// One of the apps to pick from, ticked when picked.
-private struct AppChoiceCard: View {
-    let app: SideBySideApp
-    /// The line under its name.
-    let detail: String
-    let selected: Bool
-    let action: () -> Void
-
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
     }
 
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                AppGlyph(app: app, size: 52)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(app.displayName)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Label(detail, systemImage: app.requirementSymbol)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(selected ? Theme.accent : .secondary)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.top, 2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(selected ? Theme.accent : Theme.muted)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // A picked card takes a tint of the light blue, under its content.
-            .background(shape.fill(Theme.accent.opacity(selected ? 0.08 : 0)))
-            .cardSurface(in: shape)
-            .overlay(shape.strokeBorder(Theme.accent.opacity(selected ? 0.6 : 0), lineWidth: 1))
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain, sound: .tick)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-}
+    private func close() { manager.closePopup(popup) }
 
-/// One of two choices, ticked when picked.
-private struct OptionRow: View {
-    let symbol: String
-    let title: String
-    let detail: String
-    let selected: Bool
-    /// Shows the whole detail, wrapped. Otherwise it's two lines at most, cut
-    /// in the middle, which suits an email address.
-    var wrapsDetail = false
-    let action: () -> Void
+    /// The pairing steps' title, which also titles the group they share with
+    /// the code.
+    static var pairInSettingsTitle: String { L("Pair their iPhone in Settings") }
 
-    private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-    }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                Image(systemName: symbol)
-                    .font(.system(size: 17))
+    /// What to do on their iPhone while it has to pair from Settings. Nothing
+    /// appears on it by itself, so without this the run just looks stuck.
+    private var pairInSettingsPopup: some View {
+        PopupCard(title: Self.pairInSettingsTitle,
+                  systemImage: "gearshape",
+                  tint: Theme.accent,
+                  onClose: close) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(L("Their iPhone won't ask by itself — pairing starts from its Settings."))
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .frame(width: 36, height: 36)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.control))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Text(detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(wrapsDetail ? nil : 2)
-                        .truncationMode(.middle)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: wrapsDetail)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(selected ? Theme.accent : Theme.muted)
-                    .contentTransition(.symbolEffect(.replace))
-            }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // A picked card takes a tint of the light blue, under its content.
-            .background(shape.fill(Theme.accent.opacity(selected ? 0.08 : 0)))
-            .cardSurface(in: shape)
-            .overlay(shape.strokeBorder(Theme.accent.opacity(selected ? 0.6 : 0), lineWidth: 1))
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain, sound: .tick)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-}
-
-/// A requirement or a reassurance, with a small glyph.
-private struct CheckRow: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Image(systemName: symbol)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(Theme.muted)
-                .frame(width: 20)
-            Text(text.keepingWiFiWhole)
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-/// Where a page is in the setup: a dot per step, the current one drawn out.
-private struct StageDots: View {
-    let current: Int
-    let total: Int
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(1...total, id: \.self) { index in
-                Capsule()
-                    .fill(index <= current ? Theme.accent : Theme.ice.opacity(0.14))
-                    .frame(width: index == current ? 24 : 8, height: 8)
+                    .fixedSize(horizontal: false, vertical: true)
+                NumberedSteps(steps: [
+                    L("On their iPhone, open Settings › Privacy & Security › Developer Mode."),
+                    L("Tap “Pair with %@”.", PairingController.peerHostName),
+                    L("Enter their iPhone’s passcode if it asks for it."),
+                    L("Type the code that appears here into the prompt on their iPhone."),
+                ])
             }
         }
-        .accessibilityHidden(true)
     }
 }
 
-/// One row of the run's timeline: the Install tab's status node, the title,
-/// and the line the step adds while it is the one in flight.
+// MARK: - Step row
+
+/// One row of the Side by Side checklist: a status node, the title, and the
+/// line the step adds while it is the one in flight.
 private struct SideBySideStepRow: View {
     let title: String
     let state: StepState
     var detail: String?
-    let isLast: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            VStack(spacing: 0) {
-                StepNode(state: state)
-                if !isLast {
-                    Rectangle()
-                        .fill(Theme.hairline)
-                        .frame(width: 1)
-                        .frame(maxHeight: .infinity)
-                }
-            }
-            .frame(width: 24)
+            node
+                .frame(width: 22, height: 22)
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 8) {
-                    Text(title)
-                        .font(.subheadline)
-                        .foregroundStyle(state == .pending ? .secondary : .primary)
-                    Spacer(minLength: 4)
-                    if state == .waiting {
-                        Text(L("Action needed"))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Theme.warning)
-                            .transition(.opacity)
-                    }
-                }
-                .frame(minHeight: 24)
+                Text(title)
+                    .font(.subheadline.weight(state == .pending ? .regular : .medium))
+                    .foregroundStyle(state == .pending ? .secondary : .primary)
                 if let detail {
                     Text(detail)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .contentTransition(.numericText())
-                        .transition(.opacity)
                 }
-                if !isLast { Spacer(minLength: 12) }
             }
+            Spacer(minLength: 0)
         }
         .animation(.smooth(duration: 0.3), value: state)
-        .animation(.smooth(duration: 0.3), value: detail)
     }
-}
 
-private extension String {
-    /// The text with "Wi-Fi" held together by a non-breaking hyphen, so a line
-    /// never ends in "Wi-".
-    var keepingWiFiWhole: String {
-        replacingOccurrences(of: "Wi-Fi", with: "Wi\u{2011}Fi")
+    @ViewBuilder
+    private var node: some View {
+        switch state {
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(.red)
+        case .active:
+            ProgressView().controlSize(.small)
+        case .waiting:
+            Image(systemName: "hand.raised.fill")
+                .font(.system(size: 15))
+                .foregroundStyle(.orange)
+        case .pending:
+            Circle()
+                .strokeBorder(Color(.tertiaryLabel), lineWidth: 1.5)
+                .frame(width: 18, height: 18)
+        }
     }
 }

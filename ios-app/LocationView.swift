@@ -366,14 +366,8 @@ struct RouteProgress: Equatable {
 /// Drives the Location page: fetch and mount the developer disk image, then
 /// hold a DVT session open and keep pushing the chosen coordinate at it. Only
 /// UI state lives here — the shared `Engine` owns the device connection.
-///
-/// One for the app, so Shortcuts actions (LocationShortcuts.swift) drive the
-/// same session as the page, even when iOS starts the app in the background
-/// for them and no page exists.
 @MainActor
 final class LocationManager: ObservableObject {
-
-    static let shared = LocationManager()
 
     /// Setup progress (not shown in the UI). Resets to `.notReady` on any
     /// session error, since re-pairing tears down the device link.
@@ -520,7 +514,8 @@ final class LocationManager: ObservableObject {
     /// the page opened). Setup errors are shown to the user here.
     func simulate(_ coordinate: CLLocationCoordinate2D, name: String? = nil) {
         guard !isBusy else { return }
-        guard Self.isValid(coordinate) else {
+        guard (-90...90).contains(coordinate.latitude),
+              (-180...180).contains(coordinate.longitude) else {
             lastError = ErrorHelp.explained(L("That isn't a valid coordinate."))
             return
         }
@@ -530,34 +525,24 @@ final class LocationManager: ObservableObject {
         lastSuccess = nil
         Task {
             do {
-                try await performSimulate(coordinate)
+                try await ensureReady()
+                try await engine.simulateLocation(latitude: coordinate.latitude,
+                                                  longitude: coordinate.longitude)
+                simulated = coordinate
+                keepAlive.startAudio()
+                startResending()
+                // A planned route starting at the device would start elsewhere now.
+                if startsFromDevice { dropPlannedRoute() }
                 lastSuccess = L("Location set to %@.", name ?? Self.format(coordinate))
+                engine.log("Location: simulating \(Self.format(coordinate)).")
             } catch {
+                // A dropped session can't be re-used; setup has to run again.
+                stage = .notReady
+                simulated = nil
+                stopResending()
                 lastError = message(error)
             }
             isBusy = false
-        }
-    }
-
-    /// Sets up if needed, sets `coordinate` and keeps re-sending it. The
-    /// caller holds `isBusy`.
-    private func performSimulate(_ coordinate: CLLocationCoordinate2D) async throws {
-        do {
-            try await ensureReady()
-            try await engine.simulateLocation(latitude: coordinate.latitude,
-                                              longitude: coordinate.longitude)
-            simulated = coordinate
-            keepAlive.startAudio()
-            startResending()
-            // A planned route starting at the device would start elsewhere now.
-            if startsFromDevice { dropPlannedRoute() }
-            engine.log("Location: simulating \(Self.format(coordinate)).")
-        } catch {
-            // A dropped session can't be re-used; setup has to run again.
-            stage = .notReady
-            simulated = nil
-            stopResending()
-            throw error
         }
     }
 
@@ -571,28 +556,17 @@ final class LocationManager: ObservableObject {
         stopResending()
         Task {
             do {
-                try await performStop()
+                try await engine.stopSimulatingLocation()
                 lastSuccess = L("Location reset. The device is using its own again.")
             } catch {
                 lastError = message(error)
             }
-            isBusy = false
-        }
-    }
-
-    /// Stops playback and re-sending, gives the device its own location back,
-    /// and leaves setup to run again next time, even when the reset fails.
-    /// The caller holds `isBusy`.
-    private func performStop() async throws {
-        cancelPlayback()
-        stopResending()
-        defer {
             simulated = nil
             if startsFromDevice { dropPlannedRoute() }
             stage = .notReady
             keepAlive.stopAll()
+            isBusy = false
         }
-        try await engine.stopSimulatingLocation()
     }
 
     /// Re-sends `simulated` on a timer. Individual send failures are ignored
@@ -636,15 +610,12 @@ final class LocationManager: ObservableObject {
 
     /// Saves `coordinate` under `name`, or under the coordinate itself when the
     /// name is left blank (as StikDebug does).
-    @discardableResult
-    func savePlace(named name: String, at coordinate: CLLocationCoordinate2D) -> SavedPlace {
+    func savePlace(named name: String, at coordinate: CLLocationCoordinate2D) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let place = SavedPlace(name: trimmed.isEmpty ? Self.format(coordinate) : trimmed,
-                               latitude: coordinate.latitude,
-                               longitude: coordinate.longitude)
-        savedPlaces.append(place)
+        savedPlaces.append(SavedPlace(name: trimmed.isEmpty ? Self.format(coordinate) : trimmed,
+                                      latitude: coordinate.latitude,
+                                      longitude: coordinate.longitude))
         storeSavedPlaces()
-        return place
     }
 
     func deletePlace(_ place: SavedPlace) {
@@ -660,8 +631,6 @@ final class LocationManager: ObservableObject {
     private func storeSavedPlaces() {
         guard let data = try? JSONEncoder().encode(savedPlaces) else { return }
         UserDefaults.standard.set(data, forKey: Self.savedPlacesKey)
-        // Siri's "Spoof my location to …" phrases name the saved places.
-        SideInstallerShortcuts.updateAppShortcutParameters()
     }
 
     // MARK: Routes
@@ -714,37 +683,26 @@ final class LocationManager: ObservableObject {
         } else {
             return
         }
-        guard !timeline.points.isEmpty else { return }
+        guard let start = timeline.points.first else { return }
         isBusy = true
         lastError = nil
         lastSuccess = nil
         Task {
             do {
-                try await beginPlayback(timeline, name: name)
+                try await ensureReady()
+                try await engine.simulateLocation(latitude: start.latitude,
+                                                  longitude: start.longitude)
+                simulated = start
+                keepAlive.startAudio()
+                startPlayback(timeline)
+                engine.log("Location: playing \(name) over \(Int(timeline.duration)) s.")
             } catch {
+                stage = .notReady
+                simulated = nil
+                stopResending()
                 lastError = message(error)
             }
             isBusy = false
-        }
-    }
-
-    /// Sets up if needed, puts the device on the timeline's first point and
-    /// starts moving it. The caller holds `isBusy`.
-    private func beginPlayback(_ timeline: RouteTimeline, name: String) async throws {
-        guard let start = timeline.points.first else { return }
-        do {
-            try await ensureReady()
-            try await engine.simulateLocation(latitude: start.latitude,
-                                              longitude: start.longitude)
-            simulated = start
-            keepAlive.startAudio()
-            startPlayback(timeline)
-            engine.log("Location: playing \(name) over \(Int(timeline.duration)) s.")
-        } catch {
-            stage = .notReady
-            simulated = nil
-            stopResending()
-            throw error
         }
     }
 
@@ -896,134 +854,10 @@ final class LocationManager: ObservableObject {
         plannedRoute = nil
     }
 
-    // MARK: Shortcuts
-    //
-    // What the Shortcuts actions run (LocationShortcuts.swift): the page's own
-    // steps, each waiting its turn behind whatever the page is doing and
-    // returning once the device has the result, which they report themselves.
-    // A popup left from an earlier tap would be out of date by then, so it
-    // goes.
-
-    /// Sets the device's location to `coordinate` and keeps re-sending it, as
-    /// Set location does. Stops a playing route.
-    func setLocation(_ coordinate: CLLocationCoordinate2D) async throws {
-        guard Self.isValid(coordinate) else {
-            throw EngineError.message(L("That isn't a valid coordinate."))
-        }
-        try await beginShortcutStep()
-        defer { endShortcutStep() }
-        cancelPlayback()
-        try await performSimulate(coordinate)
-    }
-
-    /// Hands the device its real location back, as Reset to real location
-    /// does. Nothing happens when nothing is simulated.
-    func resetLocation() async throws {
-        try await waitUntilIdle()
-        isBusy = true
-        defer { isBusy = false }
-        lastError = nil
-        lastSuccess = nil
-        try await performStop()
-    }
-
-    /// Loads `imported` as the page's route and plays it at `speed`, in place
-    /// of any route playing now.
-    func play(_ imported: GPXRoute, at speed: RouteSpeed) async throws {
-        try await beginShortcutStep()
-        defer { endShortcutStep() }
-        cancelPlayback()
-        dropPlannedRoute()
-        route = imported
-        routeSpeed = imported.speeds.contains(speed) ? speed : .walk
-        try await beginPlayback(RouteTimeline(route: imported, speed: routeSpeed), name: imported.name)
-    }
-
-    /// Plans a route to `destination` over OpenStreetMap and plays it, as
-    /// Find route then Play route do. It starts at `start`, or where the
-    /// device is simulated now when that's nil.
-    func travel(to destination: RouteStop, from start: RouteStop?,
-                by mode: TravelMode) async throws -> PlannedRoute {
-        try await beginShortcutStep()
-        defer { endShortcutStep() }
-        guard let origin = start?.coordinate ?? simulated else {
-            throw EngineError.message(L("Pick where the route starts, or set a location first."))
-        }
-        cancelPlayback()
-        // The page shows the route as if it had been planned there.
-        startsFromDevice = start == nil
-        travelMode = mode
-        stops = [start, destination].compactMap { $0 }
-        isPlanningRoute = true
-        var planned: PlannedRoute
-        do {
-            planned = try await RoutePlanner.plan(through: [origin, destination.coordinate], mode: mode)
-        } catch {
-            isPlanningRoute = false
-            throw error
-        }
-        isPlanningRoute = false
-        planned.deviceStart = start == nil ? origin : nil
-        route = nil
-        plannedRoute = planned
-        engine.log("Location: planned a \(mode.rawValue) route over OpenStreetMap for Shortcuts "
-                   + "(\(planned.points.count) points, \(Int(planned.distance)) m, \(Int(planned.duration)) s).")
-        try await beginPlayback(planned.timeline, name: "the planned \(mode.rawValue) route")
-        return planned
-    }
-
-    /// Stops a playing route where it is. False when none was playing.
-    @discardableResult
-    func stopRouteForShortcut() -> Bool {
-        guard isPlayingRoute else { return false }
-        endPlayback()
-        lastError = nil
-        lastSuccess = nil
-        engine.log("Location: route stopped.")
-        return true
-    }
-
-    /// Waits for the page's work, refuses during an install (it rebuilds the
-    /// tunnel the session runs over), then takes `isBusy`.
-    ///
-    /// An action usually runs with SideInstaller in the background, where iOS
-    /// gives it only so long, and a first setup (the disk image's download and
-    /// mount) or a long drive's plan can take longer. The silent audio that
-    /// holds a location keeps the app running through those too.
-    private func beginShortcutStep() async throws {
-        try await waitUntilIdle()
-        guard !engine.isRunning else {
-            throw EngineError.message(L("An install is already running. Wait for it to finish, then try again."))
-        }
-        isBusy = true
-        lastError = nil
-        lastSuccess = nil
-        keepAlive.startAudio()
-    }
-
-    /// Ends what `beginShortcutStep` began. The audio plays on only while the
-    /// device is being told a location.
-    private func endShortcutStep() {
-        isBusy = false
-        if simulated == nil { keepAlive.stopAll() }
-    }
-
-    /// Returns once nothing is setting up, setting or resetting. Setup ends
-    /// one way or the other: a stalled download times out.
-    private func waitUntilIdle() async throws {
-        while isBusy {
-            try await Task.sleep(for: .milliseconds(200))
-        }
-    }
-
     // MARK: Helpers
 
-    nonisolated static func format(_ coordinate: CLLocationCoordinate2D) -> String {
+    static func format(_ coordinate: CLLocationCoordinate2D) -> String {
         String(format: "%.5f, %.5f", coordinate.latitude, coordinate.longitude)
-    }
-
-    nonisolated static func isValid(_ coordinate: CLLocationCoordinate2D) -> Bool {
-        (-90...90).contains(coordinate.latitude) && (-180...180).contains(coordinate.longitude)
     }
 
     private func message(_ error: Error) -> String {
@@ -1037,7 +871,7 @@ final class LocationManager: ObservableObject {
 /// The Location page: a map to pick a point, and the controls that push it to
 /// the device. Pushed from Tools, whose `NavigationStack` this relies on.
 struct LocationView: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: LocationManager
@@ -1068,7 +902,7 @@ struct LocationView: View {
     var body: some View {
         ScrollViewReader { scroller in
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 18) {
                     header.cascadeItem(0)
                     // No note when Set location starts LocalDevVPN itself.
                     if !engine.tunnelAvailable {
@@ -1130,41 +964,39 @@ struct LocationView: View {
         }
         // Start setup in the background so it's ready when the user picks a
         // place. See `prepareQuietly`.
-        .onAppear {
-            manager.prepareQuietly()
-            // Show where the device is, which a shortcut may have set while
-            // the page was closed.
-            if let simulated = manager.simulated { moveMap(to: simulated) }
-        }
+        .onAppear { manager.prepareQuietly() }
     }
 
     // MARK: Header
 
     private var header: some View {
-        BrandHeader(icon: "location", image: "LocationLogo", title: L("Location spoofing")) {
+        BrandHeader(icon: "location.fill", image: "LocationLogo", title: L("Location spoofing"),
+                    animateIcon: manager.isSimulating) {
             statusPill
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
         }
     }
 
     @ViewBuilder
     private var statusPill: some View {
         if let progress = manager.routeProgress {
-            StatusDot(text: L("Playing route · %d%%", Int(progress.fraction * 100)),
-                       color: Theme.positive)
+            StatusPill(text: L("Playing route · %d%%", Int(progress.fraction * 100)),
+                       systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill",
+                       color: .green)
         } else if let simulated = manager.simulated {
-            StatusDot(text: LocationManager.format(simulated),
-                       color: Theme.positive)
+            StatusPill(text: LocationManager.format(simulated),
+                       systemImage: "location.fill", color: .green)
         } else {
-            StatusDot(text: L("Not simulating"), color: Theme.warning, idle: true)
+            StatusPill(text: L("Not simulating"), systemImage: "location.slash",
+                       color: .orange, glass: true)
         }
     }
 
     private var vpnNote: some View {
-        PanelCard {
-            HStack(alignment: .top, spacing: 8) {
+        CalloutCard(tint: .red) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "shield.lefthalf.filled")
-                    .foregroundStyle(Theme.negative)
+                    .foregroundStyle(.red)
                 Text(L("Connect LocalDevVPN. Spoofing runs over its tunnel, like everything else here."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1177,7 +1009,7 @@ struct LocationView: View {
 
     private var mapCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 sectionTitle(L("Pick a place"), systemImage: "mappin.and.ellipse")
 
                 searchField
@@ -1196,7 +1028,7 @@ struct LocationView: View {
                             Marker(stop.name ?? LocationManager.format(stop.coordinate),
                                    monogram: Text(verbatim: "\(index + 1)"),
                                    coordinate: stop.coordinate)
-                                .tint(Theme.warning)
+                                .tint(.orange)
                         }
                         if let simulated = manager.simulated {
                             Marker(L("Simulated"), systemImage: "location.fill",
@@ -1214,7 +1046,7 @@ struct LocationView: View {
                         .allowsHitTesting(false)
                 }
                 .frame(height: 280)
-                .clipShape(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                 // Icons only where the coordinate and both labels don't fit.
                 ViewThatFits(in: .horizontal) {
@@ -1224,12 +1056,12 @@ struct LocationView: View {
 
                 // On first use, the spinner also covers disk image setup.
                 Button { manager.simulate(target) } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         if manager.isBusy {
-                            ProgressView()
+                            ProgressView().tint(.white)
                             Text(L("Setting"))
                         } else {
-                            Image(systemName: "location")
+                            Image(systemName: "location.fill")
                             Text(L("Set location"))
                         }
                     }
@@ -1240,11 +1072,12 @@ struct LocationView: View {
                 if manager.isSimulating {
                     Button { manager.stop() } label: {
                         Label(L("Reset to real location"), systemImage: "location.slash")
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                    .buttonStyle(.bordered)
                     .controlSize(.regular)
+                    .tint(.orange)
                     .disabled(manager.isBusy)
                 }
             }
@@ -1270,18 +1103,19 @@ struct LocationView: View {
                 pinActionLabel(L("Save"), systemImage: "bookmark", labelled: labelled)
             }
         }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+        .buttonStyle(.bordered)
         .controlSize(.small)
+        .tint(Theme.accent)
     }
 
     @ViewBuilder
     private func pinActionLabel(_ title: String, systemImage: String, labelled: Bool) -> some View {
         if labelled {
             Label(title, systemImage: systemImage)
-                .font(.caption.weight(.medium))
+                .font(.caption.weight(.semibold))
         } else {
             Image(systemName: systemImage)
-                .font(.caption.weight(.medium))
+                .font(.caption.weight(.semibold))
                 .accessibilityLabel(title)
         }
     }
@@ -1307,7 +1141,7 @@ struct LocationView: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             TextField(L("Search for a place"), text: $query)
                 .textFieldStyle(.plain)
                 .autocorrectionDisabled()
@@ -1321,7 +1155,8 @@ struct LocationView: View {
                     Image(systemName: "magnifyingglass")
                 }
             }
-            .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+            .buttonStyle(.bordered)
+            .tint(Theme.accent)
             .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty || isSearching)
         }
     }
@@ -1370,8 +1205,8 @@ struct LocationView: View {
     /// them, played at each road's speed limit when driving.
     private var plannerCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                sectionTitle(L("Plan a route"), systemImage: "signpost.right.and.left")
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle(L("Plan a route"), systemImage: "signpost.right.and.left.fill")
 
                 Picker(L("Travel by"), selection: $manager.travelMode) {
                     ForEach(TravelMode.allCases) { mode in
@@ -1428,10 +1263,10 @@ struct LocationView: View {
                 if let deviceStart = routeDeviceStart {
                     stopRow(title: L("The device's location"), coordinate: deviceStart) {
                         Image(systemName: "location.fill")
-                            .font(.caption.weight(.semibold))
+                            .font(.caption.weight(.bold))
                             .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(Theme.positive))
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(Color.green))
                     } trailing: {
                         EmptyView()
                     }
@@ -1439,10 +1274,10 @@ struct LocationView: View {
                 ForEach(Array(manager.stops.enumerated()), id: \.element.id) { index, stop in
                     stopRow(title: stop.name ?? L("Stop %d", index + 1), coordinate: stop.coordinate) {
                         Text(verbatim: "\(index + 1)")
-                            .font(.caption.weight(.semibold))
+                            .font(.caption.weight(.bold))
                             .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
-                            .background(Circle().fill(Theme.warning))
+                            .frame(width: 26, height: 26)
+                            .background(Circle().fill(Color.orange))
                     } trailing: {
                         Menu { stopMenu(stop, index: index) } label: {
                             Image(systemName: "ellipsis.circle")
@@ -1459,17 +1294,18 @@ struct LocationView: View {
             HStack {
                 Button { addStopAtPin() } label: {
                     Label(L("Add stop"), systemImage: "plus")
-                        .font(.caption.weight(.medium))
+                        .font(.caption.weight(.semibold))
                 }
                 Spacer()
                 Button(role: .destructive) { manager.removeAllStops() } label: {
                     Label(L("Clear stops"), systemImage: "trash")
-                        .font(.caption.weight(.medium))
+                        .font(.caption.weight(.semibold))
                 }
-                .tint(Theme.negative)
+                .tint(.red)
             }
-            .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+            .buttonStyle(.bordered)
             .controlSize(.small)
+            .tint(Theme.accent)
             .disabled(manager.isPlayingPlannedRoute)
         }
     }
@@ -1488,7 +1324,7 @@ struct LocationView: View {
             badge()
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text(LocationManager.format(coordinate))
                     .font(.caption.monospaced())
@@ -1528,9 +1364,9 @@ struct LocationView: View {
     @ViewBuilder
     private var findRouteButton: some View {
         Button { manager.planRoute() } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if manager.isPlanningRoute {
-                    ProgressView()
+                    ProgressView().tint(.white)
                     Text(L("Finding route"))
                 } else {
                     Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
@@ -1556,10 +1392,10 @@ struct LocationView: View {
                 .font(.title3)
                 .foregroundStyle(Theme.accent)
                 .frame(width: 28)
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text("\(Self.formatDistance(planned.distance)) · "
                      + Self.formatDuration(planned.duration))
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                 Text(Self.routeDetail(planned))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1593,13 +1429,13 @@ struct LocationView: View {
             } else {
                 Image(systemName: mode.systemImage)
                     .font(.headline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.accent)
                     .frame(width: 44, height: 44)
-                    .background(Circle().fill(Theme.control))
+                    .background(Circle().fill(.white.opacity(0.08)))
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(stretch.name ?? L("No street name"))
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text(Self.roadDetail(stretch))
                     .font(.caption)
@@ -1608,11 +1444,9 @@ struct LocationView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            .fill(Theme.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            .strokeBorder(Theme.hairline, lineWidth: 1))
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(.white.opacity(0.06)))
         .animation(.smooth(duration: 0.3), value: stretch)
     }
 
@@ -1621,7 +1455,7 @@ struct LocationView: View {
     private var savedPlacesCard: some View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
-                sectionTitle(L("Saved places"), systemImage: "bookmark")
+                sectionTitle(L("Saved places"), systemImage: "bookmark.fill")
                 if manager.savedPlaces.isEmpty {
                     Text(L("Tap Save under the map to keep the spot under the pin. Tapping a saved place sets it straight away."))
                         .font(.caption)
@@ -1640,7 +1474,7 @@ struct LocationView: View {
 
     /// Tap to set the place; the menu shows it on the map or deletes it.
     private func savedPlaceRow(_ place: SavedPlace) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Button {
                 moveMap(to: place.coordinate)
                 manager.simulate(place.coordinate, name: place.name)
@@ -1651,7 +1485,7 @@ struct LocationView: View {
                         .foregroundStyle(.white, Theme.accent)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(place.name)
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                         Text(LocationManager.format(place.coordinate))
@@ -1661,10 +1495,10 @@ struct LocationView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, 6)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain, sound: .tap)
+            .buttonStyle(.plain)
             .disabled(!canSetLocation)
             // `.plain` doesn't dim a disabled row on its own.
             .opacity(canSetLocation ? 1 : 0.5)
@@ -1701,9 +1535,9 @@ struct LocationView: View {
 
     private var routeCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 sectionTitle(L("Play a GPX route"),
-                             systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                             systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill")
                 if let route = manager.route {
                     loadedRoute(route)
                 } else {
@@ -1720,11 +1554,12 @@ struct LocationView: View {
                             }
                             Text(L("Import GPX file"))
                         }
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                    .buttonStyle(.bordered)
                     .controlSize(.regular)
+                    .tint(Theme.accent)
                     .disabled(manager.isImportingRoute)
                 }
             }
@@ -1733,10 +1568,10 @@ struct LocationView: View {
 
     @ViewBuilder
     private func loadedRoute(_ route: GPXRoute) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(route.name)
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                 Text("\(Self.formatDistance(route.distance)) · "
                      + Self.formatDuration(route.duration(at: manager.routeSpeed)))
@@ -1774,7 +1609,7 @@ struct LocationView: View {
                     .foregroundStyle(.primary)
                 Spacer()
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.footnote.weight(.medium))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
             .fieldBackground()
@@ -1791,7 +1626,7 @@ struct LocationView: View {
     private func playbackControls<Current: View>(
         @ViewBuilder current: (RouteProgress) -> Current) -> some View {
         if let progress = manager.routeProgress {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: progress.fraction)
                     .tint(Theme.accent)
                 Text(L("%@ of %@",
@@ -1806,16 +1641,17 @@ struct LocationView: View {
 
             Button { manager.stopRoute() } label: {
                 Label(L("Stop here"), systemImage: "pause.fill")
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+            .buttonStyle(.bordered)
             .controlSize(.regular)
+            .tint(.orange)
         } else {
             Button { manager.playRoute() } label: {
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     if manager.isBusy {
-                        ProgressView()
+                        ProgressView().tint(.white)
                         Text(L("Setting"))
                     } else {
                         Image(systemName: "play.fill")
@@ -1917,12 +1753,12 @@ struct LocationView: View {
         return "\(speed.title) · \(rate)"
     }
 
-    static func formatDistance(_ meters: CLLocationDistance) -> String {
+    private static func formatDistance(_ meters: CLLocationDistance) -> String {
         Measurement(value: meters, unit: UnitLength.meters)
             .formatted(.measurement(width: .abbreviated, usage: .road).locale(Localizer.locale))
     }
 
-    static func formatDuration(_ seconds: TimeInterval) -> String {
+    private static func formatDuration(_ seconds: TimeInterval) -> String {
         Duration.seconds(seconds.rounded())
             .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated,
                               maximumUnitCount: 2)
@@ -1939,7 +1775,12 @@ struct LocationView: View {
     // MARK: Helpers
 
     private func sectionTitle(_ title: String, systemImage: String) -> some View {
-        SectionTitle(title: title, systemImage: systemImage)
+        Label {
+            Text(title).font(.headline)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(Theme.brand)
+        }
     }
 }
 
@@ -1965,12 +1806,12 @@ private struct SpeedLimitSign: View {
                     .foregroundStyle(.black)
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
-                    .padding(8)
+                    .padding(7)
             case .unlimited:
                 Stripes()
                     .stroke(.black, lineWidth: 1.6)
                     .clipShape(Circle())
-                    .padding(8)
+                    .padding(6)
                 Circle()
                     .strokeBorder(.black.opacity(0.2), lineWidth: 1)
             }

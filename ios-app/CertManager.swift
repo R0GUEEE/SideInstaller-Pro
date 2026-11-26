@@ -213,12 +213,10 @@ final class CertManager: ObservableObject {
 
     /// Writes the certificate SideInstaller signs with and its private key to a
     /// .p12 file protected by `password`, then hands the file to `share`. The
-    /// file is alone in a temporary folder, for `share` to delete when done. An
-    /// empty `password` makes a file that signing apps import without one, but
-    /// a Mac doesn't (see `p12::archive` in rust-core).
+    /// file is alone in a temporary folder, for `share` to delete when done.
     @MainActor
     func export(_ cert: DevCert, password: String, share: @escaping (URL) -> Void) {
-        guard session != nil, !isBusy else { return }
+        guard session != nil, !isBusy, !password.isEmpty else { return }
         let serial = cert.serialNumber
         guard !serial.isEmpty else {
             lastError = ErrorHelp.explained(L("This certificate has no serial number, so it can't be exported."))
@@ -265,45 +263,21 @@ final class CertManager: ObservableObject {
 
     // MARK: - SideStore's certificate
 
-    /// True when there's a SideStore certificate to ask for (see
-    /// `Engine.canUseSideStoreCertificate`).
-    var canUseSideStoreCertificate: Bool { engine.canUseSideStoreCertificate }
+    /// True when SideStore is on this iPhone to ask.
+    var sideStoreInstalled: Bool { engine.sideStoreInstalled }
 
     /// Asks SideStore for its certificate. SideStore asks whether to export it,
     /// then opens a `sideinstaller://certificate` link, which `RootView` hands
-    /// to `importCertificate`. Inside LiveContainer, where that link can't come
-    /// back, the certificate LiveContainer holds is imported instead.
-    /// `retryInstall` runs the install again after.
+    /// to `importCertificate`. `retryInstall` runs the install again after.
     @MainActor
     func requestSideStoreCertificate(retryInstall: Bool) {
         guard !isBusy else { return }
         lastError = nil
         lastSuccess = nil
-        if Engine.runsInLiveContainer {
-            importFromLiveContainer(retryInstall: retryInstall)
-            return
-        }
         engine.requestSideStoreCertificate(retryInstall: retryInstall) { [weak self] in
             self?.lastError = ErrorHelp.explained(L("SideStore isn't installed on this iPhone, so there's no certificate to get from it."))
             self?.engine.log("⛔️ Certificates: \(self?.lastError ?? "")")
         }
-    }
-
-    /// Imports SideStore's certificate from where LiveContainer keeps it
-    /// (issue #95, see `LiveContainerCertificate`).
-    @MainActor
-    private func importFromLiveContainer(retryInstall: Bool) {
-        engine.log("Certificates: inside LiveContainer, SideStore can't send its certificate back, so SideInstaller reads the one LiveContainer holds.")
-        let found = LiveContainerCertificate.find { engine.log($0) }
-        guard !found.isEmpty else {
-            lastError = ErrorHelp.explained(L("Inside LiveContainer, SideStore can't send its certificate back to SideInstaller, and LiveContainer doesn't hold one yet. In LiveContainer's Settings, tap “Import Certificate From SideStore” (sign in to SideStore first if it has no certificate), then try again here."))
-            engine.log("⛔️ Certificates: \(lastError ?? "")")
-            return
-        }
-        runImport(found.map { ImportCandidate(certificate: $0.certificate, source: $0.source) },
-                  title: "the certificate LiveContainer holds for SideStore",
-                  retryInstall: retryInstall,
-                  notOnTeam: L("The certificate LiveContainer holds for SideStore isn't one of this Apple ID's: it has been revoked, or it belongs to another Apple ID. Nothing was changed. If SideStore has made a new one since, tap “Refresh Certificate from SideStore” in LiveContainer's Settings, then try again here."))
     }
 
     /// Signs with the certificate a link brought from now on, once the Apple
@@ -312,39 +286,25 @@ final class CertManager: ObservableObject {
     /// own (error 7460 on a free account) and revoking SideStore's.
     @MainActor
     func importCertificate(_ request: CertificateImport) {
-        let cert = request.certificate
-        let source = cert.fromSideStore ? "SideStore's certificate" : "the certificate from the link"
-        runImport([ImportCandidate(certificate: cert, source: source)], title: source,
-                  retryInstall: request.retryInstall,
-                  notOnTeam: L("That certificate isn't one of this Apple ID's: it has been revoked, or it belongs to another Apple ID (SideStore may be signed in with a different one). Nothing was changed."))
-    }
-
-    /// A certificate to check, and where it came from, for the log.
-    private struct ImportCandidate {
-        let certificate: LinkedCertificate
-        let source: String
-    }
-
-    /// Signs with the first of `candidates` that the Apple ID's own
-    /// certificates include. `notOnTeam` is the error when none is.
-    @MainActor
-    private func runImport(_ candidates: [ImportCandidate], title: String,
-                           retryInstall: Bool, notOnTeam: String) {
-        guard !isImporting, !candidates.isEmpty else { return }
+        guard !isImporting else { return }
         let id = engine.normalizedAppleID, pw = engine.applePassword
         guard !id.isEmpty, !pw.isEmpty else {
             lastError = ErrorHelp.explained(L("No Apple ID saved. Add one in Settings › Account."))
             return
         }
+        let cert = request.certificate
+        let source = cert.fromSideStore ? "SideStore's certificate" : "the certificate from the link"
         isImporting = true
         lastError = nil
         lastSuccess = nil
-        engine.log("=== Certificates: checking \(title) ===")
+        engine.log("=== Certificates: checking \(source) ===")
         Task { @MainActor in
             defer { isImporting = false }
             do {
                 if session == nil { try await signIn(id: id, pw: pw) }
-                let result = try await importFirstOnTeam(candidates)
+                let result = try await onQueue {
+                    try self.performImport(p12: cert.data, password: cert.password)
+                }
                 let name = result.certificate.machineLabel ?? result.certificate.displayName
                 engine.log(result.replacedKey
                     ? "Certificates: signing with \(name) (\(result.certificate.serialNumber)) from now on; nothing was revoked."
@@ -353,7 +313,7 @@ final class CertManager: ObservableObject {
                     certs = list
                     hasLoaded = true
                 }
-                if retryInstall {
+                if request.retryInstall {
                     engine.log("Retrying the install with \(name).")
                     engine.runOneClick()
                 } else {
@@ -362,29 +322,10 @@ final class CertManager: ObservableObject {
                         : L("SideInstaller already signs with “%@”.", name)
                 }
             } catch {
-                lastError = error is ImportNotOnTeam ? notOnTeam : short(error)
+                lastError = short(error)
                 engine.log("⛔️ Certificates: \(lastError ?? "import failed")")
             }
         }
-    }
-
-    /// Imports the first of `candidates` that is one of the Apple ID's
-    /// certificates. One that isn't is passed over while others are left; any
-    /// other failure stops.
-    @MainActor
-    private func importFirstOnTeam(_ candidates: [ImportCandidate]) async throws -> CertImportResult {
-        for (index, candidate) in candidates.enumerated() {
-            if candidates.count > 1 { engine.log("Certificates: trying \(candidate.source) …") }
-            do {
-                return try await onQueue {
-                    try self.performImport(p12: candidate.certificate.data,
-                                           password: candidate.certificate.password)
-                }
-            } catch is ImportNotOnTeam where index < candidates.count - 1 {
-                engine.log("Certificates: \(candidate.source) isn't one of this Apple ID's.")
-            }
-        }
-        throw ImportNotOnTeam()
     }
 
     /// Loads the list if needed, then runs `then`. Used by the Install screen's
@@ -419,19 +360,11 @@ final class CertManager: ObservableObject {
 
     @MainActor
     private func signIn(id: String, pw: String) async throws {
-        // One Apple ID sign-in at a time (`AppleSignInQueue`).
-        let ticket = try await engine.appleSignIns.waitForTurn(.certificates, appleID: id)
-        defer { engine.appleSignIns.finished(ticket) }
-        // A load and an import can both have been waiting; the first signed in.
-        if session != nil { return }
-        // The team picked for this Apple ID, so the page shows the
-        // certificates of the team that signs.
-        let team = AccountStore.shared.team(for: id)?.teamId
-
         // Try each anisette server (only the one picked in Settings with Auto
         // off); a credential or 2FA error stops the loop.
         let servers = anisetteCandidates()
         let dir = storageDir
+        engine.twoFactorWasCancelled = false
         var failures = AnisetteServer.SignInFailures()
         var appleRefusals = AnisetteServer.AppleRefusals(servers: engine.anisetteServers)
         var appleUnreachable = 0
@@ -444,23 +377,18 @@ final class CertManager: ObservableObject {
             }
             do {
                 let summary = try await onQueue {
-                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir, team: team, ticket: ticket)
+                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir)
                 }
                 engine.anisetteSignedIn(ani)
-                AccountStore.shared.signedIn(id, withTeam: Engine.teamID(inSummary: summary))
                 teamSummary = summary
                 isSignedIn = true
                 engine.log("Certificates: signed in (\(summary)).")
                 return
             } catch let error as EngineError {
                 let failure = error.errorDescription ?? "sign-in failed"
-                if ticket.twoFactorWasCancelled {
+                if engine.twoFactorWasCancelled {
                     engine.log("Two-factor verification cancelled — stopping.")
                     throw EngineError.message(L("Two-factor verification was cancelled."))
-                }
-                if ticket.teamQuestionWasCancelled {
-                    engine.log("No developer team picked — stopping.")
-                    throw EngineError.message(Engine.noTeamPickedMessage)
                 }
                 if Engine.isAccountLocked(failure) {
                     engine.log("Apple has locked this Apple Account: \(failure)")
@@ -526,16 +454,14 @@ final class CertManager: ObservableObject {
         throw EngineError.message(engine.anisetteSignInFailure(failures))
     }
 
-    /// One sign-in attempt against a specific anisette server, on `team` when
-    /// one was picked for this Apple ID (see `Engine.answerTeam`).
-    private func performSignIn(id: String, pw: String, ani: String, dir: String,
-                               team: String?, ticket: AppleSignInTicket) throws -> String {
-        defer { engine.endSignInQuestions(for: ticket) }
+    /// One sign-in attempt against a specific anisette server.
+    private func performSignIn(id: String, pw: String, ani: String, dir: String) throws -> String {
+        defer { engine.endTwoFactor() }
         var newSession: OpaquePointer?
         var summary: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        let rc = si_cert_signin(id, pw, ani, "SideInstaller", dir, team ?? "",
-                                appleSignInTwoFactorCallback, appleSignInTeamCallback, ticket.context,
+        let rc = si_cert_signin(id, pw, ani, "SideInstaller", dir, nil,
+                                certTwoFactorCallback, nil, nil,
                                 &newSession, &summary, &error)
         if rc == 0 {
             if let old = self.session { si_cert_session_free(old) }
@@ -603,10 +529,6 @@ final class CertManager: ObservableObject {
     /// Error 3 from `si_cert_import`: no certificate on the team has the key.
     private static let importNotOnTeam: Int32 = 3
 
-    /// Thrown for error 3, which the import explains for where the
-    /// certificate came from.
-    private struct ImportNotOnTeam: Error {}
-
     private func performImport(p12: Data, password: String) throws -> CertImportResult {
         guard let session = self.session else { throw EngineError.message("Not signed in.") }
         var json: UnsafeMutablePointer<CChar>?
@@ -627,7 +549,9 @@ final class CertManager: ObservableObject {
         let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
         error.map { si_string_free($0) }
         engine.log("Certificate import: \(msg)")
-        if rc == Self.importNotOnTeam { throw ImportNotOnTeam() }
+        if rc == Self.importNotOnTeam {
+            throw EngineError.message(L("That certificate isn't one of this Apple ID's: it has been revoked, or it belongs to another Apple ID (SideStore may be signed in with a different one). Nothing was changed."))
+        }
         throw EngineError.message(L("Couldn't use that certificate: %@", msg))
     }
 
@@ -656,4 +580,11 @@ final class CertManager: ObservableObject {
             }
         }
     }
+}
+
+// MARK: - C 2FA callback
+
+/// Bridges a 2FA request during cert sign-in to the engine's shared prompt.
+private let certTwoFactorCallback: SITwoFactorCb = { _, request, outBuf, bufLen in
+    Engine.shared.answerTwoFactor(request: request, outBuf: outBuf, len: Int(bufLen))
 }

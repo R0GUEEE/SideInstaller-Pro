@@ -1,7 +1,6 @@
 import ActivityKit
 import BackgroundTasks
 import Combine
-import Observation
 import UIKit
 
 /// Shows a one-click install's progress outside the app, says so when the run
@@ -52,8 +51,6 @@ final class InstallActivity {
     /// True while the run sits suspended in the background, below iOS 26.
     private var paused = false
     private var observers: Set<AnyCancellable> = []
-    /// Counts runs, so an earlier run's watch on the engine stops (`watchEngine`).
-    private var runNumber = 0
 
     /// The identifier of the background task this run submitted, until it ends.
     private var taskID: String?
@@ -116,41 +113,24 @@ final class InstallActivity {
             ? engine.customIPAName.map { ($0 as NSString).deletingPathExtension } ?? source.displayName
             : source.displayName
 
-        runNumber += 1
-        watchEngine(run: runNumber)
-        observers = [
+        // `@Published` sends before it stores, so read the engine a turn later.
+        let changes: [AnyPublisher<Void, Never>] = [
+            engine.$stepStates.map { _ in () }.eraseToAnyPublisher(),
+            engine.$installProgress.map { _ in () }.eraseToAnyPublisher(),
+            engine.$isCancelling.map { _ in () }.eraseToAnyPublisher(),
+            engine.$twoFactor.map { _ in () }.eraseToAnyPublisher(),
+            engine.$appIDCost.map { _ in () }.eraseToAnyPublisher(),
+            engine.$guide.map { _ in () }.eraseToAnyPublisher(),
             NotificationCenter.default.publisher(for: AttentionGate.didChange)
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in self?.refresh() },
+                .map { _ in () }.eraseToAnyPublisher(),
         ]
-        // And once a turn from now, with what the run has reset by then.
-        DispatchQueue.main.async { [weak self] in self?.refresh() }
+        observers = [
+            Publishers.MergeMany(changes)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in self?.refresh() },
+        ]
         beginGrace()
         surfaceIfReady()
-    }
-
-    /// Refreshes the surfaces after any engine state they show changes, until
-    /// run `run` ends. A change is announced before it's stored, so the engine
-    /// is read a turn later.
-    private func watchEngine(run: Int) {
-        let engine = Engine.shared
-        withObservationTracking {
-            _ = engine.stepStates
-            _ = engine.installProgress
-            _ = engine.isCancelling
-            _ = engine.twoFactor
-            _ = engine.teamQuestion
-            _ = engine.appIDCost
-            _ = engine.guide
-        } onChange: {
-            // `shared` lives for the app's lifetime, so holding it costs nothing.
-            Task { @MainActor in
-                guard self.running, self.runNumber == run else { return }
-                // Watching again first, so a change made while refreshing counts.
-                self.watchEngine(run: run)
-                self.refresh()
-            }
-        }
     }
 
     /// The run ended. Away from the app, the surfaces say how until the user is
@@ -270,8 +250,7 @@ final class InstallActivity {
     /// one: its own Live Activity has that.
     private func currentNeed() -> (title: String, detail: String, symbol: String)? {
         let engine = Engine.shared
-        if let phase = engine.twoFactor, phase.isAsking {
-            let prompt = phase.prompt
+        if case .asking(let prompt) = engine.twoFactor {
             // Without the number Apple masks: this shows on the Lock Screen.
             let detail = switch prompt.method {
             case .device: L("Enter the code Apple just sent to your trusted device.")
@@ -281,11 +260,6 @@ final class InstallActivity {
             }
             return (prompt.expectsCode ? L("Two-Factor Code") : L("Choose How to Get a Code"),
                     detail, "key.fill")
-        }
-        if engine.teamQuestion != nil {
-            return (L("Which Team?"),
-                    L("Your Apple Account is on more than one developer team. Open SideInstaller and pick the one that signs."),
-                    "person.2.fill")
         }
         if let cost = engine.appIDCost {
             let detail = cost.isAffordable

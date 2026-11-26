@@ -34,6 +34,8 @@ enum DeepLink: Hashable {
 
     /// A pairing file is a few KB; anything far bigger isn't one.
     private static let maxPairingFileBytes = 1 << 20
+    /// A certificate archive is about 2.5 KB.
+    private static let maxCertificateBytes = 64 << 10
 
     /// The link SideStore is asked to open with its certificate. SideStore puts
     /// the PKCS#12 archive, base64 and percent-encoded, in place of
@@ -84,8 +86,10 @@ enum DeepLink: Hashable {
             return .link(.source(link))
 
         case "certificate":
+            // A PKCS#12 archive is a DER SEQUENCE. What's in it is checked by
+            // the import, against the Apple ID's own certificates.
             guard let raw = query["data"], let data = decodeBase64(raw),
-                  LinkedCertificate.isPlausibleArchive(data)
+                  data.count <= maxCertificateBytes, data.first == 0x30
             else {
                 return .invalid(L("That link was meant to carry a signing certificate, but what it holds can't be read."))
             }
@@ -149,19 +153,8 @@ struct LinkedCertificate: Hashable {
     /// SideStore's: the certificate's serial number. The archives SideStore
     /// writes now aren't encrypted, so it often goes unused.
     let password: String
-    /// True when it came back soon after SideStore was asked for it, or was
-    /// read from where LiveContainer keeps SideStore's.
+    /// True when it came back soon after SideStore was asked for it.
     let fromSideStore: Bool
-
-    /// A certificate archive is about 2.5 KB.
-    private static let maxBytes = 64 << 10
-
-    /// True when `data` can be a PKCS#12 archive: a DER SEQUENCE of a sane
-    /// size. What's in it is checked by the import, against the Apple ID's
-    /// own certificates.
-    static func isPlausibleArchive(_ data: Data) -> Bool {
-        data.count <= maxBytes && data.first == 0x30
-    }
 }
 
 /// A certificate on its way to the Certificates manager's import.

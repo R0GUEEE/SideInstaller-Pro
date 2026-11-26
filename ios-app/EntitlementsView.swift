@@ -237,15 +237,9 @@ final class EntitlementsManager: ObservableObject {
 
     @MainActor
     private func signIn(id: String, pw: String) async throws {
-        // One Apple ID sign-in at a time (`AppleSignInQueue`).
-        let ticket = try await engine.appleSignIns.waitForTurn(.entitlements, appleID: id)
-        defer { engine.appleSignIns.finished(ticket) }
-        // The team picked for this Apple ID, so the page shows the App IDs of
-        // the team that signs.
-        let team = AccountStore.shared.team(for: id)?.teamId
-
         let servers = anisetteCandidates()
         let dir = storageDir
+        engine.twoFactorWasCancelled = false
         var failures = AnisetteServer.SignInFailures()
         var appleRefusals = AnisetteServer.AppleRefusals(servers: engine.anisetteServers)
         var appleUnreachable = 0
@@ -258,20 +252,16 @@ final class EntitlementsManager: ObservableObject {
             }
             do {
                 let summary = try await onQueue {
-                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir, team: team, ticket: ticket)
+                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir)
                 }
                 engine.anisetteSignedIn(ani)
-                AccountStore.shared.signedIn(id, withTeam: Engine.teamID(inSummary: summary))
                 teamSummary = summary
                 engine.log("Entitlements: signed in (\(summary)).")
                 return
             } catch let error as EngineError {
                 let failure = error.errorDescription ?? "sign-in failed"
-                if ticket.twoFactorWasCancelled {
+                if engine.twoFactorWasCancelled {
                     throw EngineError.message(L("Two-factor verification was cancelled."))
-                }
-                if ticket.teamQuestionWasCancelled {
-                    throw EngineError.message(Engine.noTeamPickedMessage)
                 }
                 if Engine.isAccountLocked(failure) {
                     throw EngineError.accountLocked
@@ -334,15 +324,13 @@ final class EntitlementsManager: ObservableObject {
         throw EngineError.message(engine.anisetteSignInFailure(failures))
     }
 
-    /// One sign-in attempt, on `team` when one was picked for this Apple ID.
-    private func performSignIn(id: String, pw: String, ani: String, dir: String,
-                               team: String?, ticket: AppleSignInTicket) throws -> String {
-        defer { engine.endSignInQuestions(for: ticket) }
+    private func performSignIn(id: String, pw: String, ani: String, dir: String) throws -> String {
+        defer { engine.endTwoFactor() }
         var newSession: OpaquePointer?
         var summary: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        let rc = si_cert_signin(id, pw, ani, "SideInstaller", dir, team ?? "",
-                                appleSignInTwoFactorCallback, appleSignInTeamCallback, ticket.context,
+        let rc = si_cert_signin(id, pw, ani, "SideInstaller", dir, nil,
+                                entitlementsTwoFactorCallback, nil, nil,
                                 &newSession, &summary, &error)
         if rc == 0 {
             if let old = self.session { si_cert_session_free(old) }
@@ -422,13 +410,18 @@ final class EntitlementsManager: ObservableObject {
     }
 }
 
+/// Bridges a 2FA request during entitlement sign-in to the engine's prompt.
+private let entitlementsTwoFactorCallback: SITwoFactorCb = { _, request, outBuf, bufLen in
+    Engine.shared.answerTwoFactor(request: request, outBuf: outBuf, len: Int(bufLen))
+}
+
 // MARK: - View
 
 /// The Entitlements page: sign in, list the Apple ID's App IDs, and ask Apple to
 /// enable capabilities on one. Pushed from Tools, whose `NavigationStack` this
 /// relies on.
 struct EntitlementsView: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: EntitlementsManager
@@ -460,17 +453,17 @@ struct EntitlementsView: View {
     private var header: some View {
         BrandHeader(icon: "checklist", image: "EntitlementsLogo", title: L("Entitlements")) {
             if let team = manager.teamSummary {
-                StatusDot(text: team, color: Theme.positive)
-                    .transition(.opacity)
+                StatusPill(text: team, systemImage: "person.2.fill", color: .green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
             }
         }
     }
 
     private var loadButton: some View {
         Button { manager.loadApps() } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if manager.isWorking {
-                    ProgressView()
+                    ProgressView().tint(.white)
                     Text(manager.teamSummary == nil ? L("Signing in") : L("Refreshing"))
                 } else {
                     Image(systemName: manager.hasLoaded ? "arrow.clockwise" : "list.bullet.rectangle")
@@ -495,7 +488,7 @@ struct EntitlementsView: View {
                     Text(manager.apps.count == 1
                          ? L("%d App ID", manager.apps.count)
                          : L("%d App IDs", manager.apps.count))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -506,7 +499,7 @@ struct EntitlementsView: View {
                     } label: {
                         appRow(app)
                     }
-                    .buttonStyle(.plain, sound: .tick)
+                    .buttonStyle(.plain)
                     .cascadeItem(3 + idx)
                 }
             }
@@ -518,10 +511,10 @@ struct EntitlementsView: View {
             HStack(spacing: 12) {
                 Image(systemName: "app.badge.checkmark")
                     .font(.title3)
-                    .foregroundStyle(Theme.muted)
-                VStack(alignment: .leading, spacing: 4) {
+                    .foregroundStyle(Theme.brand)
+                VStack(alignment: .leading, spacing: 3) {
                     Text(app.displayName)
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                     Text(app.identifier)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -529,14 +522,14 @@ struct EntitlementsView: View {
                         .truncationMode(.middle)
                     if let results = manager.outcomes[app.id] {
                         Text(L("%d of %d enabled", results.filter(\.ok).count, results.count))
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(results.contains(where: \.ok) ? Theme.positive : Theme.warning)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(results.contains(where: \.ok) ? .green : .orange)
                     }
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.muted)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -546,7 +539,7 @@ struct EntitlementsView: View {
             VStack(spacing: 8) {
                 Image(systemName: "questionmark.app.dashed")
                     .font(.largeTitle)
-                    .foregroundStyle(Theme.muted)
+                    .foregroundStyle(Theme.brand)
                 Text(L("No App IDs"))
                     .font(.headline)
                 Text(L("This Apple ID hasn't registered any apps yet. Install something with SideInstaller first, then come back."))
@@ -576,7 +569,7 @@ private struct EntitlementPicker: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 18) {
                 appCard.cascadeItem(0)
                 // What Apple said shows as a popup; the rows keep its marks.
                 ForEach(Array(Entitlement.Group.allCases.enumerated()), id: \.element.id) { idx, group in
@@ -594,22 +587,25 @@ private struct EntitlementPicker: View {
 
     private var appCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 Text(app.displayName)
-                    .font(.title3.weight(.semibold))
+                    .font(.title3.weight(.bold))
                 Text(app.identifier)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
-                HStack(spacing: 8) {
+                HStack(spacing: 10) {
                     Button(L("Recommended")) { selected = Entitlement.recommendedIDs }
-                        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(Theme.accent)
                     Button(L("Select all")) { selected = Set(Entitlement.all.map(\.id)) }
-                        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(Theme.accent)
                     Button(L("None")) { selected = [] }
-                        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .tint(.secondary)
                 }
                 .padding(.top, 4)
             }
@@ -626,8 +622,8 @@ private struct EntitlementPicker: View {
                     // accounts, so the rest are marked Beta.
                     if group == .other {
                         Text(L("Beta"))
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.accent)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Theme.accent2)
                     }
                     Spacer(minLength: 0)
                 }
@@ -662,19 +658,19 @@ private struct EntitlementPicker: View {
                 }
                 Spacer(minLength: 6)
                 if let outcome = results?.first(where: { $0.capability == entitlement.id }) {
-                    Image(systemName: outcome.ok ? "checkmark.seal" : "xmark.circle.fill")
-                        .foregroundStyle(outcome.ok ? Theme.positive : Theme.warning)
+                    Image(systemName: outcome.ok ? "checkmark.seal.fill" : "xmark.circle.fill")
+                        .foregroundStyle(outcome.ok ? .green : .orange)
                 }
             }
         }
-        .buttonStyle(.plain, sound: selected.contains(entitlement.id) ? .fall : .rise)
+        .buttonStyle(.plain)
     }
 
     private var applyBar: some View {
         Button { manager.enable(Array(selected), on: app) } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if isApplying {
-                    ProgressView()
+                    ProgressView().tint(.white)
                     Text(L("Asking Apple"))
                 } else {
                     Image(systemName: "checkmark.seal")
@@ -721,12 +717,12 @@ struct EntitlementsPopup: View {
         let granted = results.filter(\.ok)
         let refused = results.filter { !$0.ok }
         return PopupCard(title: L("%d of %d enabled", granted.count, results.count),
-                         systemImage: granted.isEmpty ? "exclamationmark.triangle" : "checkmark.seal",
-                         tint: granted.isEmpty ? Theme.warning : Theme.positive,
+                         systemImage: granted.isEmpty ? "exclamationmark.triangle.fill" : "checkmark.seal.fill",
+                         tint: granted.isEmpty ? .orange : .green,
                          onClose: close) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text(appName)
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                 if !granted.isEmpty {
                     Text(L("Install the app again for these to take effect."))
                         .font(.footnote)
@@ -736,7 +732,7 @@ struct EntitlementsPopup: View {
                 ForEach(refused) { outcome in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(outcome.name)
-                            .font(.caption.weight(.medium))
+                            .font(.caption.weight(.semibold))
                         Text(outcome.error)
                             .font(.caption2)
                             .foregroundStyle(.secondary)

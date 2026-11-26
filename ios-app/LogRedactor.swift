@@ -10,10 +10,7 @@ import Foundation
 /// Every line passes through `redact` before it's shown, copied or mirrored
 /// to stdout. The rules match how the plists, XPC messages and pairing
 /// structures are printed (idevice's pretty printer and Rust's `{:#?}`), plus
-/// Swift's `  Key = value` lines. Any list of more than 32 numbers that's left
-/// becomes its count, since a key name can't be matched when a whole file is
-/// printed as bytes. Then Rust's one-item-per-line lists are put on one line
-/// (`compactions`).
+/// Swift's `  Key = value` lines.
 enum LogRedactor {
 
     // MARK: Public
@@ -21,7 +18,6 @@ enum LogRedactor {
     static func redact(_ line: String) -> String {
         var text = line
         for rule in rules { text = rule(text) }
-        for compaction in compactions { text = compaction(text) }
         return text
     }
 
@@ -84,12 +80,10 @@ enum LogRedactor {
 
     /// One printed value, in the forms the log uses:
     /// Rust `{:#?}` bytes `Data(\n [\n 225,\n … ],\n )`; idevice's
-    /// `Data(E9 14 … Len: 32)`; a Rust `Vec<u8>`, `[225, 120]` or
-    /// `Some([225, 120])`; wrapped scalars `String("…")`, `UInt64(…)`; quoted
-    /// strings; bare tokens. A list has to be matched whole: as a bare token
-    /// only its `[225` was taken, and a key's other 31 bytes stayed.
+    /// `Data(E9 14 … Len: 32)`; wrapped scalars `String("…")`, `UInt64(…)`;
+    /// quoted strings; bare tokens.
     private static let value = #"""
-    (?:Data\(\s*\[[^\]]*\]\s*,?\s*\)|Data\([^)]*\)|Some\(\s*\[[^\]]*\]\s*,?\s*\)|\[[^\]]*\]|[A-Za-z0-9]+\(\s*"(?:[^"\\]|\\.)*"\s*\)|[A-Za-z0-9]+\([^()\s,]*\)|"(?:[^"\\]|\\.)*"|[^\s,;)}\]]+)
+    (?:Data\(\s*\[[^\]]*\]\s*,?\s*\)|Data\([^)]*\)|[A-Za-z0-9]+\(\s*"(?:[^"\\]|\\.)*"\s*\)|[A-Za-z0-9]+\([^()\s,]*\)|"(?:[^"\\]|\\.)*"|[^\s,;)}\]]+)
     """#
 
     // MARK: Rules
@@ -131,39 +125,6 @@ enum LogRedactor {
         replacing(#"\b(team:? )[^\n]+ (\([A-Z0-9]{10}\))"#) { m, s in
             "\(s.group(m, 1))‹name› \(s.group(m, 2))"
         },
-        // Last, as a backstop: any other list of more than `longList` numbers,
-        // on one line or one per line. A file read back over AFC was logged
-        // that way, a pairing file's private keys and a .p12 with its password
-        // included. Shorter lists stay: a public key, a salt, a TLV's state.
-        // A plain greedy run of one character class: with a repeated group or
-        // a possessive run, ICU silently stops matching past ~100,000 entries.
-        replacing(#"\[[0-9\s,\-]*\]"#) { m, s in
-            let list = s.group(m, 0)
-            let entries = list.split(whereSeparator: { !$0.isNumber && $0 != "-" })
-            return entries.count > longList ? numbersMarker(entries) : list
-        },
-    ]
-
-    /// How many numbers a list can hold before it's taken out: a 32-byte key
-    /// is still shown.
-    private static let longList = 32
-
-    // MARK: Compaction
-
-    /// Puts back on one line what Rust's `{:#?}` prints an item per line, so a
-    /// public key isn't 35 lines of a report (#100): lists of numbers, then
-    /// wrappers around one value, `Data(\n [\n 103,\n 229,\n ],\n)` becoming
-    /// `Data([103, 229])`. Only whitespace changes. Runs after the rules, so
-    /// what they take out is already gone.
-    private static let compactions: [(String) -> String] = [
-        replacing(#"\[[ \t]*\n(?:[ \t]*-?\d+,[ \t]*\n)+[ \t]*\]"#) { m, s in
-            let numbers = s.group(m, 0).split(whereSeparator: { !$0.isNumber && $0 != "-" })
-            return "[\(numbers.joined(separator: ", "))]"
-        },
-        // A marker counts as one value, for `Data(‹40 bytes redacted›)`.
-        replacing(#"\b([A-Za-z_][A-Za-z0-9_]*)\([ \t]*\n[ \t]*(\[[^\]\n]*\]|‹[^›\n]*›|"(?:[^"\\\n]|\\.)*"|-?\d+(?:\.\d+)?|true|false),[ \t]*\n[ \t]*\)"#) { m, s in
-            "\(s.group(m, 1))(\(s.group(m, 2)))"
-        },
     ]
 
     /// What a taken value is replaced with. Bytes keep their count, since a
@@ -178,22 +139,10 @@ enum LogRedactor {
             }
             return bytesMarker(count: byteCount(value))
         }
-        // `[225, 120]`, `Some([…])`: a list of numbers keeps its length.
-        let list = value.hasPrefix("Some(") ? value.dropFirst(5) : Substring(value)
-        if list.hasPrefix("["), list.allSatisfy({ $0.isNumber || "[](),- \t\n".contains($0) }) {
-            return numbersMarker(list.split(whereSeparator: { !$0.isNumber && $0 != "-" }))
-        }
         return "‹redacted›"
     }
 
     private static func bytesMarker(count: Int) -> String { "‹\(count) bytes redacted›" }
-
-    /// What a long list of numbers becomes: its count, as bytes when every
-    /// entry fits in one.
-    private static func numbersMarker(_ entries: [Substring]) -> String {
-        let bytes = entries.allSatisfy { Int($0).map { (0...255).contains($0) } ?? false }
-        return bytes ? bytesMarker(count: entries.count) : "‹\(entries.count) numbers redacted›"
-    }
 
     /// Entries in a printed byte list: `[\n 225,\n 120,\n ]` or `[225, 120]`.
     private static func byteCount(_ list: String) -> Int {

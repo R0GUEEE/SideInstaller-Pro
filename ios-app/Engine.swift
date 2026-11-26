@@ -1,6 +1,5 @@
 import Foundation
 import Network
-import Observation
 import UIKit
 import SideInstallerFFI
 
@@ -109,10 +108,19 @@ enum EngineError: LocalizedError {
 }
 
 /// All install logic. A singleton so the C log callback can reach it.
-@Observable
-final class Engine {
+final class Engine: ObservableObject {
 
     static let shared = Engine()
+
+    // MARK: Log console
+
+    struct LogEntry: Identifiable {
+        let id = UUID()
+        let stamp: String
+        let text: String
+    }
+
+    @Published private(set) var lines: [LogEntry] = []
 
     // MARK: Inputs
 
@@ -128,7 +136,7 @@ final class Engine {
     var applePassword: String { AccountStore.shared.activePassword }
     /// Anisette server in use: the one picked in Settings or, with Auto on,
     /// the one the last successful sign-in used. Persisted.
-    var anisetteURL: String = Engine.savedAnisetteURL() {
+    @Published var anisetteURL: String = Engine.savedAnisetteURL() {
         didSet {
             guard anisetteURL != oldValue else { return }
             UserDefaults.standard.set(anisetteURL, forKey: Engine.anisetteURLKey)
@@ -141,7 +149,7 @@ final class Engine {
     /// of how likely they are to work, from `anisetteURL` (see
     /// `anisetteCandidates`). Off, the server picked there is the only one
     /// tried. On by default, as every sign-in tried them all before 1.6.
-    var anisetteAuto: Bool =
+    @Published var anisetteAuto: Bool =
         (UserDefaults.standard.object(forKey: Engine.anisetteAutoKey) as? Bool) ?? true {
         didSet {
             guard anisetteAuto != oldValue else { return }
@@ -169,12 +177,12 @@ final class Engine {
         return start.address
     }
     /// Servers for the picker; a bundled snapshot until the live list loads.
-    private(set) var anisetteServers: [AnisetteServer] = AnisetteServer.bundledDefaults
+    @Published private(set) var anisetteServers: [AnisetteServer] = AnisetteServer.bundledDefaults
     /// "Start LocalDevVPN when needed" setting: whatever needs the tunnel starts
     /// LocalDevVPN when it's down, instead of asking for it. On by default.
     /// Stored here (not `@AppStorage`) so the engine and the Settings toggle
     /// share one value.
-    var autoStartVPN: Bool =
+    @Published var autoStartVPN: Bool =
         (UserDefaults.standard.object(forKey: Engine.autoStartVPNKey) as? Bool) ?? true {
         didSet {
             guard autoStartVPN != oldValue else { return }
@@ -189,53 +197,25 @@ final class Engine {
     /// carries over.
     static let autoStartVPNKey = "autoStartLocalDevVPN"
 
-    /// Settings › Activity Log › Verbose logging: idevice's DEBUG lines, every
-    /// plist, XPC message and pairing step exchanged with iOS, go into the log.
-    /// Off by default, since they quickly fill it.
-    var verboseLogging: Bool = UserDefaults.standard.bool(forKey: Engine.verboseLoggingKey) {
-        didSet {
-            guard verboseLogging != oldValue else { return }
-            UserDefaults.standard.set(verboseLogging, forKey: Engine.verboseLoggingKey)
-            si_log_set_verbose(verboseLogging ? 1 : 0)
-            log(verboseLogging
-                ? "Verbose logging on: idevice's DEBUG lines now go into this log."
-                : "Verbose logging off.")
-        }
-    }
-
-    static let verboseLoggingKey = "verboseLogging"
-
     // The loopback VPN's device-side IP; configurable in Advanced.
-    var deviceIP: String = Engine.defaultDeviceIP
+    @Published var deviceIP: String = Engine.defaultDeviceIP
     /// Device IP's default: LocalDevVPN's far end of the tunnel.
     static let defaultDeviceIP = "10.7.0.1"
     /// `deviceIP` normalized to a dialable host, e.g. `10.7.0.1/32` → `10.7.0.1`.
     var deviceHost: String { NetworkStatus.host(deviceIP) }
     // Which build to install (SideStore, LiveContainer + SideStore, Madeira, or
     // an imported IPA).
-    var installSource: InstallSource = .sideStore
+    @Published var installSource: InstallSource = .sideStore
     // Which release track to pull that build from (stable or nightly).
-    var releaseChannel: ReleaseChannel = .stable
-    /// The track the selected build is installed from: the picked one, or the
-    /// only one the build offers.
+    @Published var releaseChannel: ReleaseChannel = .stable
+    /// The track the selected build is installed from: the picked one, or
+    /// stable for a build that has no nightly.
     var selectedChannel: ReleaseChannel {
-        let offered = channels(for: installSource)
-        return offered.contains(releaseChannel) ? releaseChannel : offered[0]
+        installSource.hasNightly ? releaseChannel : .stable
     }
-    /// The channels the picker offers for `source`.
-    func channels(for source: InstallSource) -> [ReleaseChannel] {
-        source.channels(stableReleased: source.firstStableVersion == nil || stableReleased.contains(source))
-    }
-    /// Builds whose stable channel waits for a first release (Madeira, until
-    /// 0.2.0) that GitHub has shown is out. Remembered across launches and
-    /// checked again whenever the build is picked (`checkStableRelease`).
-    private(set) var stableReleased: Set<InstallSource> =
-        Set((UserDefaults.standard.stringArray(forKey: Engine.stableReleasedKey) ?? [])
-            .compactMap(InstallSource.init(rawValue:)))
-    private static let stableReleasedKey = "stableReleased"
     /// Versions picked under Advanced, per build and channel; a missing entry
     /// installs the latest release. Not persisted, like the channel.
-    private var pickedVersions: [InstallSource: [ReleaseChannel: ReleaseVersion]] = [:]
+    @Published private var pickedVersions: [InstallSource: [ReleaseChannel: ReleaseVersion]] = [:]
 
     /// The version picked for the selected build and channel; nil installs the
     /// latest release.
@@ -245,20 +225,20 @@ final class Engine {
     }
 
     /// Each build's releases, listed by the version picker under Advanced.
-    private(set) var releaseCatalogs: [InstallSource: ReleaseCatalog] = [:]
+    @Published private(set) var releaseCatalogs: [InstallSource: ReleaseCatalog] = [:]
     /// The build whose releases are being fetched, if any.
-    private(set) var loadingCatalog: InstallSource?
+    @Published private(set) var loadingCatalog: InstallSource?
     /// Why the last fetch of a build's releases failed.
-    private(set) var catalogErrors: [InstallSource: String] = [:]
+    @Published private(set) var catalogErrors: [InstallSource: String] = [:]
 
     // MARK: Plain-text status readouts
 
     /// Loopback-tunnel state, polled by `startStatusMonitor`.
-    var vpnConnected: Bool = false
+    @Published var vpnConnected: Bool = false
     /// Wi-Fi (`en0`) state, polled alongside the tunnel.
-    var wifiConnected: Bool = false
-    var vpnStatus: String = "unknown"
-    var wifiStatus: String = "unknown"
+    @Published var wifiConnected: Bool = false
+    @Published var vpnStatus: String = "unknown"
+    @Published var wifiStatus: String = "unknown"
 
     /// Minimum iOS that can create its own pairing file (RPPairing host and the
     /// Settings pairing prompt).
@@ -280,47 +260,6 @@ final class Engine {
     }
 
     var canSelfPair: Bool { Engine.deviceCanSelfPair }
-
-    /// True below iOS 27 on hardware that can update to it, where updating
-    /// makes the computer-made pairing file unnecessary. iOS 27 runs on the
-    /// same iPhones as iOS 26 (iPhone 11 and SE 2nd generation on); iPadOS 27
-    /// drops the A12/A12X iPads (8th generation iPad, mini 5, Air 3, the 2018
-    /// iPad Pros) but keeps the 2020 A12Z iPad Pros.
-    static var canUpdateToSelfPairingOS: Bool {
-        guard !deviceCanSelfPair else { return false }
-        let model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"]
-            ?? ProblemReport.sysctlString("hw.machine")
-        return model.map(supportsSelfPairingOS) ?? false
-    }
-
-    /// Whether a hardware model, e.g. "iPhone12,8", is on the iOS/iPadOS 27 list.
-    static func supportsSelfPairingOS(model: String) -> Bool {
-        let family = model.prefix { $0.isLetter }
-        let numbers = model.dropFirst(family.count).split(separator: ",").compactMap { Int($0) }
-        guard numbers.count == 2 else { return false }
-        let (major, minor) = (numbers[0], numbers[1])
-        switch family {
-        case "iPhone": return major >= 12               // iPhone12,1 = iPhone 11
-        case "iPad": return major >= 12                 // iPad12,1 = iPad (9th generation)
-            || (major == 8 && minor >= 9)               // iPad8,9–8,12 = 2020 iPad Pros
-        default: return false
-        }
-    }
-
-    /// Whether Developer Mode is on, from the `security.mac.amfi.developer_mode_status`
-    /// sysctl AMFI publishes; nil when this iOS won't let the app read it.
-    /// Static so non-isolated code can read it.
-    static var developerModeIsOn: Bool? {
-        var value: Int32 = 0
-        var size = MemoryLayout<Int32>.size
-        guard sysctlbyname("security.mac.amfi.developer_mode_status", &value, &size, nil, 0) == 0,
-              size == MemoryLayout<Int32>.size else { return nil }
-        return value != 0
-    }
-
-    /// True when SideInstaller runs as a LiveContainer guest. iOS then applies
-    /// LiveContainer's Info.plist to the process, not SideInstaller's.
-    static var runsInLiveContainer: Bool { getenv("LC_HOME_PATH") != nil }
 
     /// False from iOS 26.4 on, where lockdownd hangs up on a connection that
     /// reaches it through a loopback VPN, on its first request. A lockdown pair
@@ -363,29 +302,29 @@ final class Engine {
 
     /// Filename of the imported pairing file, if the one on disk was imported.
     /// Persisted across launches.
-    private(set) var importedPairingName: String? =
+    @Published private(set) var importedPairingName: String? =
         UserDefaults.standard.string(forKey: Engine.importedPairingNameKey)
     /// True while a picked pairing file is being read in.
-    private(set) var isImportingPairing = false
+    @Published private(set) var isImportingPairing = false
 
     static let importedPairingNameKey = "importedPairingFileName"
-    var pairingStatus: String = L("not paired")
-    var signInStatus: String = "signed out"
+    @Published var pairingStatus: String = L("not paired")
+    @Published var signInStatus: String = "signed out"
 
     // Path to the pairing file in use (generated by RPPairing or imported).
-    var pairingFilePath: String?
+    @Published var pairingFilePath: String?
 
     // MARK: One-click orchestration state
 
     /// Per-step status, behind the checklist and progress bar.
-    var stepStates: [Step: StepState] = Dictionary(
+    @Published var stepStates: [Step: StepState] = Dictionary(
         uniqueKeysWithValues: Step.allCases.map { ($0, .pending) })
 
     /// Install percentage (0…1) streamed from installation_proxy.
-    var installProgress: Double = 0
+    @Published var installProgress: Double = 0
 
     /// The pairing PIN to display prominently, when one has been issued.
-    var pairingPIN: String?
+    @Published var pairingPIN: String?
 
     /// Short human summary of the connected device, e.g. "iPhone · iOS 17.5".
     @Published var deviceSummary: String?
@@ -426,94 +365,82 @@ final class Engine {
     private(set) var deviceName: String?
 
     /// The current contextual instruction card (nil = none).
-    var guide: Guide?
+    @Published var guide: Guide?
 
     /// True when signing stopped on error 7460; offers revoke-and-retry.
-    var certConflict: Bool = false
+    @Published var certConflict: Bool = false
 
     /// True while the one-click pipeline is running.
-    var isRunning: Bool = false
+    @Published var isRunning: Bool = false
 
     /// True from a cancel until the run stops, which waits for the step in
     /// flight to reach a safe point.
-    private(set) var isCancelling: Bool = false
+    @Published private(set) var isCancelling: Bool = false
 
     /// Set when the pipeline stops on an error; cleared on a new run.
-    var lastError: String?
+    @Published var lastError: String?
 
     /// Set once the whole pipeline has completed successfully.
-    var finished: Bool = false
+    @Published var finished: Bool = false
 
     /// What this run put into Madeira, so the last steps can say what's there.
     private var madeiraHandoff = MadeiraHandoff()
-    /// True once this run put the pairing file into AltStore, whose Remote
-    /// AltServer setup then skips pairing.
-    private var altStoreHoldsPairing = false
 
     /// Set when the success popup, or the LiveContainer certificate popup, is
     /// closed; a new run brings them back.
-    private var successClosed = false
-    private var liveContainerImportClosed = false
+    @Published private var successClosed = false
+    @Published private var liveContainerImportClosed = false
 
     /// True once the Local Network prompt has been raised this launch, so the
     /// imported-pairing path asks at most once.
-    @ObservationIgnored private var askedLocalNetwork = false
+    private var askedLocalNetwork = false
 
     private var pipelineTask: Task<Void, Never>?
     private var lastInstallSucceeded = false
     private var queuedInstallActive = false
     /// The IPA download a run starts as soon as the network is up, so it runs
     /// alongside pairing and sign-in instead of after them.
-    @ObservationIgnored private var prefetch: (source: InstallSource, channel: ReleaseChannel, version: String?,
+    private var prefetch: (source: InstallSource, channel: ReleaseChannel, version: String?,
                            task: Task<String, Error>)?
     /// The Apple ID sign-in a run starts once pairing is settled, so it runs
     /// while the device link opens.
-    @ObservationIgnored private var backgroundSignIn: Task<Void, Error>?
+    private var backgroundSignIn: Task<Void, Error>?
     /// Device work a run starts once the link is open, so it overlaps sign-in,
     /// download and signing; see `startDevicePreparation`.
-    @ObservationIgnored private var devicePreparation: Task<PreparedPairing, Never>?
+    private var devicePreparation: Task<PreparedPairing, Never>?
     /// The files signing won't change, copied to the device from the downloaded
     /// IPA while signing runs; see `startPrestage`.
-    @ObservationIgnored private var prestage: Task<DeviceConnection.PrestagedBundle?, Never>?
+    private var prestage: Task<DeviceConnection.PrestagedBundle?, Never>?
     /// Runs that have ended. A background sign-in carries the count from when it
     /// started, so a 2FA request it makes after its run stopped can be declined.
     /// Main thread only.
-    @ObservationIgnored private var finishedRuns = 0
+    private var finishedRuns = 0
     /// Held while a Trust prompt has the user's attention, so a 2FA sheet waits
     /// instead of covering it.
     let attention = AttentionGate()
     /// Poll that keeps `vpnConnected` live; NWPathMonitor never fires for a
     /// loopback tunnel, which carries no default route.
-    @ObservationIgnored private var statusTimer: Timer?
+    private var statusTimer: Timer?
     /// The last probe of a full-tunnel VPN, and the one running, if any; see
     /// `fullTunnelAnswer`. Main thread only.
-    @ObservationIgnored private var lastFullTunnelProbe: (key: String, result: NetworkStatus.ProbeResult, date: Date)?
-    @ObservationIgnored private var fullTunnelProbe: (key: String, task: Task<NetworkStatus.ProbeResult, Never>)?
-
-    /// The build installed, or being installed: the one picked, or the build
-    /// of SideInstaller's own that a custom IPA turned out to be, which is set
-    /// up just like that build's download.
-    private var installedBuild: InstallSource {
-        let source = downloadedSource ?? installSource
-        guard source == .custom else { return source }
-        return recognizedSource ?? .custom
-    }
+    private var lastFullTunnelProbe: (key: String, result: NetworkStatus.ProbeResult, date: Date)?
+    private var fullTunnelProbe: (key: String, task: Task<NetworkStatus.ProbeResult, Never>)?
 
     /// True when the installed build is LiveContainer + SideStore.
     var installedIsLiveContainer: Bool {
-        installedBuild == .liveContainer
+        (downloadedSource ?? installSource) == .liveContainer
     }
 
     /// Name of the build that was installed, or is selected.
     var installedSourceName: String {
-        let source = installedBuild
+        let source = downloadedSource ?? installSource
         if source == .custom, let signed = signedDisplayName { return signed }
         return source.displayName
     }
 
     /// Home-screen name of the app that landed on the device.
     var installedAppName: String {
-        installedBuild.pairingAppDisplayName
+        (downloadedSource ?? installSource).pairingAppDisplayName
             ?? signedDisplayName
             ?? L("your app")
     }
@@ -533,34 +460,29 @@ final class Engine {
 
     // Apple ID sign-in and signing (isideload), serialized on signQueue.
     private let signQueue = DispatchQueue(label: "sideinstaller.sign")
-    @ObservationIgnored private var signSession: OpaquePointer?          // SignSession*
+    private var signSession: OpaquePointer?          // SignSession*
     /// Team ID of the signed-in account, parsed from the sign-in summary. Only
     /// apps signed by this team can be refreshed in place.
-    private(set) var signingTeamID: String?
-    var downloadedIPAPath: String?
+    @Published private(set) var signingTeamID: String?
+    @Published var downloadedIPAPath: String?
     // Source, channel and picked version (nil: latest) the current download
     // corresponds to.
     private var downloadedSource: InstallSource?
     private var downloadedChannel: ReleaseChannel?
     private var downloadedVersion: String?
-    /// For a custom IPA, the build of SideInstaller's own it is, if it is one
-    /// (`IPALibrary.knownSource`).
-    private var recognizedSource: InstallSource?
-    var signedAppPath: String?
+    @Published var signedAppPath: String?
     /// CFBundleDisplayName read off the signed bundle.
-    private(set) var signedDisplayName: String?
+    @Published private(set) var signedDisplayName: String?
     /// Filename of the IPA imported for `InstallSource.custom`, if any.
-    private(set) var customIPAName: String?
-    /// The build of SideInstaller's own that the imported IPA is, if it is one.
-    private(set) var customIPABuild: InstallSource?
+    @Published private(set) var customIPAName: String?
     /// True while a picked IPA is being copied in.
-    private(set) var isImportingIPA = false
+    @Published private(set) var isImportingIPA = false
     /// Download progress of a link import (0…1); nil for file imports.
-    private(set) var importProgress: Double?
+    @Published private(set) var importProgress: Double?
     /// The App ID cost a custom IPA's run is waiting on the go-ahead for.
-    private(set) var appIDCost: AppIDCost?
+    @Published private(set) var appIDCost: AppIDCost?
     /// Resumed with the answer to `appIDCost`: true to sign and install.
-    @ObservationIgnored private var appIDCostReply: CheckedContinuation<Bool, Never>?
+    private var appIDCostReply: CheckedContinuation<Bool, Never>?
     /// The `sideinstaller://` link waiting for the go-ahead.
     @Published private(set) var pendingLink: DeepLink?
     /// A source a `sideinstaller://source` link brought, waiting for the
@@ -572,28 +494,30 @@ final class Engine {
     @Published private(set) var installMenuRevision = 0
     /// When SideStore was last asked for its pairing file, so the file it sends
     /// back can be told from one some other link brought.
-    @ObservationIgnored private var sideStorePairingRequestedAt: Date?
+    private var sideStorePairingRequestedAt: Date?
     /// When SideStore was last asked for its certificate, and whether the
     /// install that stopped on error 7460 runs again once it's in.
-    @ObservationIgnored private var sideStoreCertificateRequest: (at: Date, retryInstall: Bool)?
+    private var sideStoreCertificateRequest: (at: Date, retryInstall: Bool)?
     /// A certificate a link brought, for `RootView` to hand to the Certificates
     /// manager, which checks it against the Apple ID's own before using it.
-    var certificateToImport: CertificateImport?
+    @Published var certificateToImport: CertificateImport?
 
-    /// Lets one Apple ID sign-in talk to Apple at a time, whichever feature
-    /// started it.
-    let appleSignIns = AppleSignInQueue { Engine.shared.log($0) }
-
-    // 2FA bridge: a sign-in's FFI callback blocks until the sheet answers its
-    // request.
+    // 2FA bridge: the FFI callback blocks on this semaphore until the UI answers.
     /// What the two-factor sheet shows; nil while no sign-in is asking.
-    private(set) var twoFactor: TwoFactorPhase?
-    private let twoFactorRequests = TwoFactorRequests(markingCancelled: { $0.markTwoFactorCancelled() })
-    // Team bridge: likewise for which developer team signs, when the Apple ID
-    // is on more than one and none of them was picked yet.
-    /// What the team sheet shows; nil while no sign-in is asking.
-    private(set) var teamQuestion: TeamQuestion?
-    private let teamRequests = TeamRequests(markingCancelled: { $0.markTeamQuestionCancelled() })
+    @Published private(set) var twoFactor: TwoFactorPhase?
+    private let twoFactorSem = DispatchSemaphore(value: 0)
+    /// Guards the answer handed from the main thread to the waiting Rust worker.
+    private let twoFactorLock = NSLock()
+    private var twoFactorAnswer: TwoFactorAnswer?
+    private var awaitingTwoFactor = false
+    /// Set when the user cancels the 2FA prompt, so sign-in stops re-prompting.
+    var twoFactorWasCancelled = false
+
+    private let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
 
     private init() {
         installLogging()
@@ -606,14 +530,7 @@ final class Engine {
         // Refresh the anisette server picker from the live community list.
         loadAnisetteServers()
         // Reflect an IPA imported in an earlier run.
-        showCustomImport(IPALibrary.customImport()?.url)
-        // A Madeira CI build from before Madeira had channels is its nightly.
-        IPALibrary.moveMadeiraCIBuildsToNightly()
-        // What's installed may have changed while the app was away.
-        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
-                                               object: nil, queue: .main) { [weak self] _ in
-            self?.foregroundVisits += 1
-        }
+        customIPAName = IPALibrary.customImport()?.url.lastPathComponent
     }
 
     // MARK: - Anisette servers
@@ -635,23 +552,63 @@ final class Engine {
     // MARK: - Logging
 
     private func installLogging() {
-        // Before init, so the first idevice line is already filtered.
-        si_log_set_verbose(verboseLogging ? 1 : 0)
         let rc = si_log_init(siLogCallback, nil)
         if rc == 0 {
             log("si_log_init: OK — idevice tracing is now piped into this console.")
         } else {
             log("si_log_init: already initialised (rc=\(rc)).")
         }
-        if verboseLogging {
-            log("Verbose logging is on: idevice's DEBUG lines are included.")
+    }
+
+    /// Append a line from Swift. Safe to call from any thread.
+    func log(_ message: String) {
+        appendLine(message)
+    }
+
+    /// Append a line that originated in the Rust core's tracing output.
+    func appendRustLine(_ message: String) {
+        appendLine("[rust] " + message)
+    }
+
+    /// How many log lines to keep; the oldest are dropped first.
+    private static let maxLogLines = 2000
+
+    /// True when launched with `SIDEINSTALLER_LOG_STDOUT` set, which mirrors every
+    /// line to stdout so a run on an iPhone can be followed and timed from a Mac
+    /// (`xcrun devicectl device process launch --console`).
+    private static let mirrorsLogToStdout =
+        ProcessInfo.processInfo.environment["SIDEINSTALLER_LOG_STDOUT"] != nil
+
+    private func appendLine(_ raw: String) {
+        // Before anything keeps it: the console, Copy logs, and the stdout mirror.
+        let message = LogRedactor.redact(raw)
+        let stamp = dateFormatter.string(from: Date())
+        if Self.mirrorsLogToStdout {
+            fputs("\(stamp)  \(message)\n", stdout)
+            fflush(stdout)
+        }
+        let entry = LogEntry(stamp: stamp, text: message)
+        if Thread.isMainThread {
+            store(entry)
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.store(entry) }
         }
     }
 
-    /// Append a line from Swift to the activity log (`LogStore`). Safe to call
-    /// from any thread.
-    func log(_ message: String) {
-        LogStore.shared.append(message)
+    private func store(_ entry: LogEntry) {
+        lines.append(entry)
+        if lines.count > Self.maxLogLines {
+            lines.removeFirst(lines.count - Self.maxLogLines)
+        }
+    }
+
+    func clearLog() {
+        lines.removeAll()
+    }
+
+    /// One big string for the “Copy logs” button.
+    func logText() -> String {
+        lines.map { "\($0.stamp)  \($0.text)" }.joined(separator: "\n")
     }
 
     // MARK: - Step / guide helpers
@@ -680,7 +637,6 @@ final class Engine {
             self.certConflict = false
             self.appIDCost = nil
             self.madeiraHandoff = MadeiraHandoff()
-            self.altStoreHoldsPairing = false
         }
     }
 
@@ -786,9 +742,8 @@ final class Engine {
                 // to the device: both take the patched build.
                 try await applyAppConfiguration()
                 // Signing registers App IDs, which a free Apple ID has few of,
-                // so an imported IPA waits for the go-ahead first, unless it's
-                // one of SideInstaller's own builds, installed like its download.
-                if installedBuild == .custom {
+                // so an imported IPA waits for the go-ahead first.
+                if downloadedSource == .custom {
                     try await confirmAppIDCost()
                 }
                 // Most of the app is the same signed or not, so that part goes
@@ -1182,7 +1137,7 @@ final class Engine {
                 self.signInStatus = "signed out"
                 self.signingTeamID = nil
             }
-            self.log("Apple ID or its team changed — signed out of the previous sign-in.")
+            self.log("Apple ID changed — signed out of the previous account.")
         }
     }
 
@@ -1228,14 +1183,12 @@ final class Engine {
         }
     }
 
-    /// Signs in to the Apple ID, trying each anisette server in turn, once the
-    /// sign-ins queued ahead of it are done (`AppleSignInQueue`).
+    /// Signs in to the Apple ID, trying each anisette server in turn.
     /// Pass `updatingChecklist: false` from flows outside the Install tab (e.g.
     /// app refresh) so they don't change its checklist. `run` tags a run's
     /// background sign-in; see `finishedRuns`.
     @MainActor
-    private func signIn(updatingChecklist: Bool = true, run: Int? = nil,
-                        purpose: AppleSignInPurpose = .install) async throws {
+    private func signIn(updatingChecklist: Bool = true, run: Int? = nil) async throws {
         if signSession != nil {
             log("Already signed in this session — skipping.")
             if updatingChecklist { setStep(.signIn, .done) }
@@ -1246,21 +1199,11 @@ final class Engine {
         }
         if updatingChecklist { setStep(.signIn, .active) }
 
-        let id = normalizedAppleID, pw = applePassword, dir = storageDir
-        let ticket = try await appleSignIns.waitForTurn(purpose, appleID: id, run: run)
-        defer { appleSignIns.finished(ticket) }
-        // A sign-in that went first may have signed this session in.
-        if signSession != nil {
-            log("Already signed in this session — skipping.")
-            if updatingChecklist { setStep(.signIn, .done) }
-            return
-        }
-        // Read once its turn has come, since the one ahead may have picked it.
-        let team = AccountStore.shared.team(for: id)?.teamId
-
         // Anisette servers go down often, so with Auto on try each one before
         // giving up. A server picked in Settings is the only one tried.
         let servers = anisetteCandidates()
+        let id = normalizedAppleID, pw = applePassword, dir = storageDir
+        twoFactorWasCancelled = false
         var failures = AnisetteServer.SignInFailures()
         var appleRefusals = AnisetteServer.AppleRefusals(servers: anisetteServers)
         var appleUnreachable = 0
@@ -1281,10 +1224,9 @@ final class Engine {
             }
             do {
                 let summary = try await onSignQueue {
-                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir, team: team, ticket: ticket)
+                    try self.performSignIn(id: id, pw: pw, ani: ani, dir: dir, run: run)
                 }
                 anisetteSignedIn(ani)
-                AccountStore.shared.signedIn(id, withTeam: Self.teamID(inSummary: summary))
                 signInStatus = "signed in (\(summary))"
                 if updatingChecklist { setStep(.signIn, .done) }
                 return
@@ -1292,16 +1234,10 @@ final class Engine {
                 let failure = error.errorDescription ?? "sign-in failed"
 
                 // A cancelled 2FA prompt isn't the server's fault.
-                if ticket.twoFactorWasCancelled {
+                if twoFactorWasCancelled {
                     log("Two-factor verification cancelled — stopping.")
                     signInStatus = "signed out"
                     throw EngineError.message(L("Two-factor verification was cancelled."))
-                }
-                // Nor is a team question closed unanswered.
-                if ticket.teamQuestionWasCancelled {
-                    log("No developer team picked — stopping.")
-                    signInStatus = "signed out"
-                    throw EngineError.message(Self.noTeamPickedMessage)
                 }
                 // A locked account fails everywhere, and retrying keeps it locked.
                 if Self.isAccountLocked(failure) {
@@ -1395,21 +1331,21 @@ final class Engine {
         throw EngineError.message(anisetteSignInFailure(failures))
     }
 
-    /// One sign-in attempt against a specific anisette server. `team` is the
-    /// team picked for this Apple ID, if one was; without it, or when the
-    /// account is no longer on it, Rust asks (`answerTeam`) when there's more
-    /// than one.
+    /// One sign-in attempt against a specific anisette server.
     private func performSignIn(id: String, pw: String, ani: String, dir: String,
-                               team: String?, ticket: AppleSignInTicket) throws -> String {
-        defer { endSignInQuestions(for: ticket) }
+                               run: Int? = nil) throws -> String {
+        defer { endTwoFactor() }
         log("Apple ID sign-in for \(LogRedactor.maskAppleID(id)) via anisette \(Self.oneLine(ani)) …")
         var session: OpaquePointer?
         var summary: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
+        // The run rides along as the callback's context (offset by one, since a
+        // null context means none), so its 2FA requests can be told apart.
+        let context = run.flatMap { UnsafeMutableRawPointer(bitPattern: $0 + 1) }
         // 1 = save and reuse the developer session, so repeat sign-ins skip
         // Apple authentication until the token expires.
-        let rc = si_apple_signin(id, pw, ani, "SideInstaller", dir, 1, team ?? "",
-                                 appleSignInTwoFactorCallback, appleSignInTeamCallback, ticket.context,
+        let rc = si_apple_signin(id, pw, ani, "SideInstaller", dir, 1, nil,
+                                 twoFactorCallback, nil, context,
                                  &session, &summary, &error)
         if rc == 0 {
             if let old = self.signSession { si_sign_session_free(old) }
@@ -1706,16 +1642,9 @@ final class Engine {
                 setStep(.download, .done)
                 return
             }
-            if let failure = error as? SideStoreDownloader.DownloadError {
-                if failure.isRepoUnavailable {
-                    // With the repository gone, the user's own copy is the only way in.
-                    setGuide(Guides.repoUnavailable(source: src, saveAs: src.fileName(channel)))
-                } else if failure.manualSideloadHelps,
-                          let link = Self.manualDownloadLink(source: src, channel: channel, version: version) {
-                    // Where GitHub can't be reached, a copy fetched another way
-                    // goes in as a custom IPA.
-                    setGuide(Guides.githubUnreachable(source: src, link: link))
-                }
+            // With the repository gone, the user's own copy is the only way in.
+            if (error as? SideStoreDownloader.DownloadError)?.isRepoUnavailable == true {
+                setGuide(Guides.repoUnavailable(source: src, saveAs: src.fileName(channel)))
             }
             // Renaming a file to the build's name helps only the latest build.
             if version == nil { logImportHint(for: error, source: src, channel: channel) }
@@ -1792,26 +1721,9 @@ final class Engine {
         downloadedSource = source
         downloadedChannel = channel
         downloadedVersion = version
-        recognizedSource = source == .custom ? IPALibrary.knownSource(ofIPAAt: url) : nil
     }
 
     // MARK: Versions to pick from (Advanced)
-
-    /// Asks GitHub whether `source`'s stable channel has its first release yet,
-    /// for a build whose stable channel waits for one (Madeira). One request
-    /// to the website, which has no hourly limit; no answer keeps what was
-    /// known. Not applied during a run, which has already picked its channel.
-    @MainActor
-    func checkStableRelease(for source: InstallSource) async {
-        guard source.firstStableVersion != nil,
-              let released = await SideStoreDownloader.hasStableRelease(source),
-              released != stableReleased.contains(source), !isRunning else { return }
-        if released { stableReleased.insert(source) } else { stableReleased.remove(source) }
-        UserDefaults.standard.set(stableReleased.map(\.rawValue).sorted(), forKey: Self.stableReleasedKey)
-        log(released
-            ? "\(source.displayName) has a stable release now — offering Stable and Nightly."
-            : "\(source.displayName) has no stable release yet — offering its nightly builds only.")
-    }
 
     /// Lists `source`'s releases for the version picker, unless a list from the
     /// last 15 minutes is at hand. One GitHub API call, which counts against the
@@ -1828,7 +1740,7 @@ final class Engine {
         do {
             let catalog = try await SideStoreDownloader.releaseCatalog(source: source)
             releaseCatalogs[source] = catalog
-            log("Versions: \(source.displayName) has \(catalog.others[.stable]?.count ?? 0) stable and \(catalog.others[.nightly]?.count ?? 0) nightly builds besides the latest.")
+            log("Versions: \(source.displayName) has \(catalog.others[.stable]?.count ?? 0) stable and \(catalog.others[.nightly]?.count ?? 0) pre-release builds besides the latest.")
         } catch is CancellationError {
             // The picker closed mid-fetch; opening it again retries.
         } catch {
@@ -1849,9 +1761,6 @@ final class Engine {
         }
         adopt(entry.url, source: source, channel: channel)
         log("Using your own \(entry.url.lastPathComponent) — skipping the download.")
-        if let known = recognizedSource {
-            log("\(entry.url.lastPathComponent) is \(known.displayName): it's set up the same way as SideInstaller's own download.")
-        }
         setStep(.download, .done)
     }
 
@@ -1866,7 +1775,7 @@ final class Engine {
         log("Importing \(url.lastPathComponent) …")
         do {
             let dest = try await Self.copyImport(from: url)
-            showCustomImport(dest)
+            customIPAName = dest.lastPathComponent
             // Clear the cached path so the next run uses the new file.
             if downloadedSource == .custom { downloadedIPAPath = nil }
             setGuide(nil)
@@ -1914,7 +1823,7 @@ final class Engine {
             // The download lives in its own staging directory; remove all of it.
             defer { try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent()) }
             let dest = try await Self.copyImport(from: downloaded)
-            showCustomImport(dest)
+            customIPAName = dest.lastPathComponent
             // Clear the cached path so the next run uses the new file.
             if downloadedSource == .custom { downloadedIPAPath = nil }
             setGuide(nil)
@@ -1989,14 +1898,7 @@ final class Engine {
     /// Re-read the custom import from disk.
     @MainActor
     func refreshCustomIPA() {
-        showCustomImport(IPALibrary.customImport()?.url)
-    }
-
-    /// Shows the custom import at `url`, or none, on the Install tab: its name,
-    /// and the build of SideInstaller's own it is.
-    private func showCustomImport(_ url: URL?) {
-        customIPAName = url?.lastPathComponent
-        customIPABuild = url.flatMap(IPALibrary.knownSource(ofIPAAt:))
+        customIPAName = IPALibrary.customImport()?.url.lastPathComponent
     }
 
     /// A different .ipa has just been imported: put the Install screen back to
@@ -2034,20 +1936,7 @@ final class Engine {
             return
         }
         guard (error as? SideStoreDownloader.DownloadError)?.manualSideloadHelps ?? true else { return }
-        log("Can't reach \(source.feed?.name ?? "GitHub")? Download \(source.displayName) on another device or through a proxy, then import it under Custom .ipa (it's recognized and set up the same way), or rename it to \(wanted) and copy it into Files › On My iPhone › SideInstaller. Then tap Install again.")
-    }
-
-    /// Where to get the build in a browser when SideInstaller can't download
-    /// it: the file itself when it has a fixed link, otherwise the releases page.
-    /// None for a build from an AltStore source: the card it's for is about
-    /// reaching GitHub.
-    private static func manualDownloadLink(source: InstallSource, channel: ReleaseChannel,
-                                           version: ReleaseVersion?) -> URL? {
-        guard source.feed == nil else { return nil }
-        let releases = source.repo.flatMap { URL(string: "https://github.com/\($0)/releases") }
-        // A GitHub Actions build comes zipped, so the releases page stands in.
-        if let version { return version.artifactSHA256 == nil ? version.assetURL : releases }
-        return source.downloadURL(channel) ?? releases
+        log("Can't reach GitHub? Download \(source.displayName) on another device or through a proxy, rename it to \(wanted), copy it into Files › On My iPhone › SideInstaller, then tap Install again.")
     }
 
     // MARK: Step 6 — sign the IPA
@@ -2150,9 +2039,8 @@ final class Engine {
         if udid.isEmpty {
             log("⚠️ No device UDID captured — run the Connect step first, or signing may fail with error 8220.")
         }
-        // Bundled into AltStore for its Remote AltServer setup, which only
-        // AltStore 2.3 reads there; 2.3.1 and later, like the other apps, get
-        // the pairing file after the install instead.
+        // Bundled into AltStore for its Remote AltServer setup; other apps
+        // get the pairing file after the install instead.
         let pairingPath = pairingFilePath ?? PairingController.pairingFilePath()
         let source = downloadedSource ?? installSource
         let requestExtraMemory = extraMemory
@@ -2176,7 +2064,7 @@ final class Engine {
             // User-fixable failures get an explanatory card. A certificate that
             // already exists offers revoke-and-retry, never revoked automatically.
             if case EngineError.certExists = error {
-                setGuide(Guides.certExists(sideStoreCertificate: canUseSideStoreCertificate))
+                setGuide(Guides.certExists(sideStoreInstalled: sideStoreInstalled))
                 certConflict = true
             }
             if case let EngineError.deviceRegistration(udid, raw) = error {
@@ -2195,17 +2083,10 @@ final class Engine {
         }
     }
 
-    /// Every app gets Increased Memory Limit on its App ID before the profile is
-    /// requested, as iLoader 2.4.1 does, unless it's an app store that refreshes
-    /// itself, such as SideStore and LiveContainer + SideStore: SideStore registers
-    /// their App IDs again each week without it, so their next profiles would grant
-    /// less than they're signed with (isideload's `MemoryLimit`). A refusal from
-    /// Apple only leaves it out.
-    ///
-    /// `forMadeira` signs the way Madeira needs: with that capability required,
-    /// and without an app group. Madeira renews its own profile and registers
-    /// its App ID again when it runs out; it can restore the first on a new App
-    /// ID, not the second.
+    /// `forMadeira` signs the way Madeira needs: with Increased Memory Limit
+    /// enabled on its App IDs before the profile is requested, and without an
+    /// app group. Madeira renews its own profile and registers its App ID again
+    /// when it runs out; it can restore the first on a new App ID, not the second.
     private func performSign(session: OpaquePointer, ipa: String, udid: String, deviceName: String,
                              pairingFilePath: String, forMadeira: Bool, extraMemory: Bool) throws -> String {
         log("Signing \(ipa) …")
@@ -2218,7 +2099,6 @@ final class Engine {
         }
         var signed: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        // Memory limit: 1 = required, 2 = where it's safe (see sideinstaller.h).
         let rc = si_sign_ipa(session, ipa, udid, deviceName, pairingFilePath,
                              increasedMemory ? 1 : 0, forMadeira ? 0 : 1, &signed, &error)
         if rc == 0 {
@@ -2531,7 +2411,7 @@ final class Engine {
         setStep(.writePairing, .active)
         let path = pairingFilePath ?? PairingController.pairingFilePath()
         // The installed build decides the host app and where the file lands.
-        let source = installedBuild
+        let source = downloadedSource ?? installSource
         // Built on the sign queue, where all isideload calls run, before the
         // device-queue write below; a run starts it during the install.
         let accountConfig: String?
@@ -2542,21 +2422,16 @@ final class Engine {
         }
         let udid = deviceUDID
         do {
-            let handed = try await onDeviceQueue {
+            madeiraHandoff = try await onDeviceQueue {
                 try self.performWritePairing(path: path, udid: udid, source: source,
                                              accountConfig: accountConfig, prepared: prepared)
             }
-            madeiraHandoff = handed.madeira
-            altStoreHoldsPairing = handed.altStorePairing
         } catch {
             // SideStore can't work without this file. Madeira can pair itself or
-            // use StikDebug, AltStore pairs as its Remote AltServer is set up,
-            // and an imported IPA may not want one at all.
+            // use StikDebug, and an imported IPA may not want one at all.
             guard source.pairingIsOptional else { throw error }
             if signedAppIsMadeira(source) {
                 log("⚠️ Couldn't reach Madeira's container (\(short(error))). It's installed: set up JIT in Madeira, and refresh it under Tools › Sideloaded apps.")
-            } else if source == .altStore {
-                log("⚠️ Couldn't put the pairing file into AltStore (\(short(error))). It's installed: setting up its Remote AltServer pairs it instead.")
             } else {
                 log("⚠️ Couldn't seed the pairing file into \(installedAppName) (\(short(error))). It's installed and ready — only AltStore-family apps need that file.")
             }
@@ -2564,18 +2439,10 @@ final class Engine {
         setStep(.writePairing, .done)
     }
 
-    /// What step 8 handed to the app it installed, for the last steps' card.
-    private struct Handed {
-        var madeira = MadeiraHandoff()
-        /// AltStore got the pairing file.
-        var altStorePairing = false
-    }
-
-    /// Returns what Madeira was handed, when the app is Madeira, and whether
-    /// AltStore got the pairing file, when it's AltStore.
+    /// Returns what Madeira was handed, when the app is Madeira.
     private func performWritePairing(path: String, udid: String?, source: InstallSource,
                                      accountConfig: String?,
-                                     prepared: PreparedPairing? = nil) throws -> Handed {
+                                     prepared: PreparedPairing? = nil) throws -> MadeiraHandoff {
         guard connection.isConnected else { throw EngineError.message(L("Device link dropped — reconnect.")) }
         let size = fileSize(path)
         guard FileManager.default.fileExists(atPath: path), size > 0 else {
@@ -2614,11 +2481,7 @@ final class Engine {
                 log("⚠️ Couldn't hand Madeira the pairing file (\(short(error))). Pair it under its Settings › JIT › JIT setup, or write the file again from Tools › Pairing.")
             }
             handed.signIn = handOffMadeiraSignIn(accountConfig, bundleID: bundleID)
-            return Handed(madeira: handed)
-        }
-        if source == .altStore {
-            return Handed(altStorePairing: try handOffAltStorePairing(placementPath: placement,
-                                                                      bundleID: bundleID))
+            return handed
         }
         // SideStore reads the file at its Documents root, LiveContainer deeper.
         let remoteRel = source.pairingRemoteRelativePath
@@ -2652,23 +2515,7 @@ final class Engine {
                 log("⚠️ Couldn't hand \(appName) the signing certificate (\(short(error))). It's installed and ready, but it will ask to resign itself on first sign-in.")
             }
         }
-        return Handed()
-    }
-
-    /// Gives AltStore the RPPairing record on its own, where AltServer puts it
-    /// (see `AltStorePairingHandoff`). Returns false, writing nothing, when the
-    /// pairing file has none. Runs on `deviceQueue`.
-    private func handOffAltStorePairing(placementPath: String, bundleID: String) throws -> Bool {
-        let file = try Data(contentsOf: URL(fileURLWithPath: placementPath))
-        guard let record = AltStorePairingHandoff.record(from: file) else {
-            log("This pairing file has no RPPairing record, the only kind AltStore connects with, so none was written. Setting up AltStore's Remote AltServer pairs it instead.")
-            return false
-        }
-        let rel = AltStorePairingHandoff.remoteRelativePath
-        log("Writing the RPPairing record into \(bundleID) /Documents/\(rel) …")
-        let written = try connection.writeFile(intoBundleID: bundleID, remoteRelativePath: rel, data: record)
-        log("Pairing file written into AltStore and read-back VERIFIED (\(written) bytes). AltStore takes it in when its Remote AltServer is set up, which then skips pairing.")
-        return true
+        return MadeiraHandoff()
     }
 
     /// Gives Madeira the RPPairing record on its own (see
@@ -2684,22 +2531,6 @@ final class Engine {
         log("Writing the RPPairing record into \(bundleID) /Documents/\(rel) …")
         let written = try connection.writeFile(intoBundleID: bundleID, remoteRelativePath: rel, data: record)
         log("Pairing file written into Madeira and read-back VERIFIED (\(written) bytes). Madeira moves it into its Keychain the next time it looks for one.")
-        return true
-    }
-
-    /// Gives ARMSX3 the RPPairing record on its own (see
-    /// `ARMSX3PairingHandoff`). Returns false, writing nothing, when the
-    /// pairing file has none. Runs on `deviceQueue`.
-    private func handOffARMSX3Pairing(placementPath: String, bundleID: String) throws -> Bool {
-        let file = try Data(contentsOf: URL(fileURLWithPath: placementPath))
-        guard let record = ARMSX3PairingHandoff.record(from: file) else {
-            log("⚠️ This pairing file has no RPPairing record, the only kind ARMSX3's JIT reads, so nothing was written. Import a remote pairing file (from idevice_pair or iLoader) here, or generate one on iOS 27, then try again.")
-            return false
-        }
-        let rel = ARMSX3PairingHandoff.remoteRelativePath
-        log("Writing the RPPairing record into \(bundleID) /Documents/\(rel) …")
-        let written = try connection.writeFile(intoBundleID: bundleID, remoteRelativePath: rel, data: record)
-        log("Pairing file written into ARMSX3 and read-back VERIFIED (\(written) bytes). ARMSX3 takes it in the next time it opens; if it's open now, close it in the app switcher first.")
         return true
     }
 
@@ -2726,7 +2557,7 @@ final class Engine {
     /// Starts building the certificate hand-off for the build just signed.
     @MainActor
     private func startAccountConfig() -> Task<String?, Never> {
-        let source = installedBuild
+        let source = downloadedSource ?? installSource
         return Task { @MainActor in await self.accountConfigJSON(source: source) }
     }
 
@@ -2845,9 +2676,9 @@ final class Engine {
     /// counts only if its signed bundle ID starts with `com.SideStore.SideStore`.
     private func accountConfigRemoteRelativePath(source: InstallSource) -> String? {
         switch source {
-        case .sideStore:          return "Account.sideconf"
-        case .liveContainer:      return "SideStore/Documents/Account.sideconf"
-        case .madeira, .altStore: return nil
+        case .sideStore:     return "Account.sideconf"
+        case .liveContainer: return "SideStore/Documents/Account.sideconf"
+        case .madeira:       return nil
         case .custom:
             guard signedAppBundleID()?.hasPrefix("com.SideStore.SideStore") == true else { return nil }
             return "Account.sideconf"
@@ -3107,12 +2938,12 @@ final class Engine {
     /// `canOpenURL` can't see it (see `appPresence`), so it counts as
     /// installed there and opening it is what tells.
     var localDevVPNInstalled: Bool {
-        mayBeInstalled(scheme: Self.localDevVPNScheme)
+        Self.appPresence(scheme: Self.localDevVPNScheme) != .missing
     }
 
     /// Time of the last handover, so a second caller waits for it instead of
     /// opening LocalDevVPN again.
-    @ObservationIgnored private var lastVPNStartAttempt: Date?
+    private var lastVPNStartAttempt: Date?
 
     /// Opens LocalDevVPN to connect its tunnel and return. Returns false if
     /// nothing opened, so it isn't installed; whether the tunnel connects
@@ -3331,22 +3162,6 @@ final class Engine {
             lastError = L("Couldn't import %@: %@", url.lastPathComponent, error.localizedDescription)
             log("⛔️ Pairing import: \(lastError ?? "")")
         }
-    }
-
-    /// Imports a pairing file a Shortcuts action was handed, as the picker's
-    /// import does, throwing what the picker would show.
-    @MainActor
-    func importPairingFile(data: Data, name: String) throws {
-        guard !isRunning else {
-            throw EngineError.message(L("An install is already running. Wait for it to finish, then try again."))
-        }
-        let kind = PairingFileKind.of(data: data)
-        guard data.count <= 1 << 20, kind.isUsable else {
-            throw EngineError.message(ErrorHelp.explained(L("%@ isn't a pairing file. Pick the file your computer made — a .mobiledevicepairing or .plist holding this iPhone's pair record.",
-                                                            name)))
-        }
-        log("Importing pairing file \(name) from Shortcuts …")
-        try adoptPairingFile(data, kind: kind, name: name)
     }
 
     /// Makes a checked pairing file the one in use, replacing the one on disk,
@@ -3596,32 +3411,13 @@ final class Engine {
     /// True unless SideStore is known to be missing (see `appPresence`).
     /// Opening it reports when it isn't there.
     var sideStoreInstalled: Bool {
-        mayBeInstalled(scheme: "sidestore")
-    }
-
-    /// True when “Use SideStore's certificate” has somewhere to get it: SideStore
-    /// is on this iPhone, or SideInstaller runs inside LiveContainer, which
-    /// keeps SideStore's certificate itself (`LiveContainerCertificate`).
-    var canUseSideStoreCertificate: Bool {
-        Self.runsInLiveContainer || sideStoreInstalled
+        Self.appPresence(scheme: "sidestore") != .missing
     }
 
     /// True unless LiveContainer is known to be missing (see `appPresence`).
     /// Opening it reports when it isn't there.
     var liveContainerInstalled: Bool {
-        mayBeInstalled(scheme: "livecontainer")
-    }
-
-    /// Bumped each time SideInstaller comes back to the front. Apps installed
-    /// or deleted meanwhile aren't observed, so what looks them up reads this
-    /// first, and the views showing it redraw then.
-    private(set) var foregroundVisits = 0
-
-    /// True unless the app opening `scheme://` links is known to be missing,
-    /// read again each time SideInstaller is back in front.
-    private func mayBeInstalled(scheme: String) -> Bool {
-        _ = foregroundVisits
-        return Self.appPresence(scheme: scheme) != .missing
+        Self.appPresence(scheme: "livecontainer") != .missing
     }
 
     // Is another app installed?
@@ -3659,14 +3455,6 @@ final class Engine {
         return Set(schemes.map { $0.lowercased() })
     }()
 
-    /// LiveContainer's name on the Home Screen, which the Files app gives its
-    /// folder too; nil outside LiveContainer.
-    static var liveContainerName: String? {
-        guard runsInLiveContainer, let bundle = liveContainerBundle() else { return nil }
-        return bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
-            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
-    }
-
     /// LiveContainer's own bundle, from the `+[NSUserDefaults lcMainBundle]`
     /// it adds for the guest app.
     private static func liveContainerBundle() -> Bundle? {
@@ -3695,27 +3483,10 @@ final class Engine {
         }
     }
 
-    /// True when “Get it from SideStore” has somewhere to get the pairing file:
-    /// SideStore is on this iPhone, or, inside LiveContainer, LiveContainer
-    /// carries the built-in SideStore whose file is read instead. A SideStore
-    /// installed on its own can't hand its file to a LiveContainer guest.
-    var canGetSideStorePairing: Bool {
-        _ = foregroundVisits
-        return Self.runsInLiveContainer
-            ? LiveContainerSideStorePairing.hasBuiltInSideStore != false
-            : sideStoreInstalled
-    }
-
     /// Opens SideStore, which sends back the pairing file it has as a
     /// `sideinstaller://pairingFile` link. That link asks before importing.
-    /// Inside LiveContainer, which the link can't reach, the pairing file the
-    /// built-in SideStore keeps is read instead, and the same popup asks.
     @MainActor
     func requestSideStorePairing() {
-        if Self.runsInLiveContainer {
-            offerBuiltInSideStorePairing()
-            return
-        }
         guard let url = URL(string: "sidestore://pairing?urlname=\(DeepLink.scheme)") else { return }
         lastError = nil
         sideStorePairingRequestedAt = Date()
@@ -3727,27 +3498,6 @@ final class Engine {
                 self.lastError = ErrorHelp.explained(L("SideStore isn't installed on this iPhone, so there's no pairing file to get from it."))
                 self.log("⛔️ Pairing import: \(self.lastError ?? "")")
             }
-        }
-    }
-
-    /// Puts up the link popup with the pairing file LiveContainer's built-in
-    /// SideStore keeps (see `LiveContainerSideStorePairing`), or says what to
-    /// do when there's none to be had.
-    @MainActor
-    private func offerBuiltInSideStorePairing() {
-        lastError = nil
-        log("Pairing import: inside LiveContainer, SideStore can't send its pairing file back, so SideInstaller reads the one LiveContainer's built-in SideStore keeps.")
-        switch LiveContainerSideStorePairing.find(log: { self.log($0) }) {
-        case let .found(file, from: names):
-            let link = DeepLink.pairingFile(file)
-            pendingLink = link
-            log("Pairing import: \(link.logDescription), from \(names.joined(separator: " + ")). Waiting for the go-ahead.")
-        case .unreachable:
-            lastError = ErrorHelp.explained(L("In LiveContainer's Multitask Mode, SideInstaller can't open the built-in SideStore's files. Open SideInstaller in LiveContainer without Multitask Mode, then try again, or tap “Import pairing file” and pick the file your computer made."))
-            log("⛔️ Pairing import: \(lastError ?? "")")
-        case .notFound:
-            lastError = ErrorHelp.explained(L("Inside LiveContainer, SideStore can't send its pairing file back to SideInstaller, and LiveContainer's built-in SideStore has none that SideInstaller can use. Tap “Import pairing file” and pick the file your computer made, or import one into SideStore first, then try again here."))
-            log("⛔️ Pairing import: \(lastError ?? "")")
         }
     }
 
@@ -3873,10 +3623,7 @@ final class Engine {
         guard connection.isConnected else { throw EngineError.message(L("Device link dropped — reconnect.")) }
         let bundleID = target.bundleID
         if target.app.takesRemoteRecordOnly {
-            let handed = try target.name == ARMSX3PairingHandoff.appName
-                ? handOffARMSX3Pairing(placementPath: placementPath, bundleID: bundleID)
-                : handOffMadeiraPairing(placementPath: placementPath, bundleID: bundleID)
-            guard handed else {
+            guard try handOffMadeiraPairing(placementPath: placementPath, bundleID: bundleID) else {
                 throw EngineError.message(L("This pairing file has no RPPairing record, the only kind %@ reads.", target.name))
             }
             return
@@ -3930,8 +3677,8 @@ final class Engine {
     }
 
     /// Sets SideStore up to sign in the way its users got past Apple's -80046
-    /// and HTTP 503s (`SideStoreAnisetteHandoff`). After the install, as
-    /// `handOffSplitPairing`; failures only log. Runs on `deviceQueue`.
+    /// (`SideStoreAnisetteHandoff`). After the install, as `handOffSplitPairing`;
+    /// failures only log. Runs on `deviceQueue`.
     private func handOffSideStoreAnisette(bundleID: String, appName: String, home: SideStoreHome) {
         let prefsPath = home.preferencesPath(hostBundleID: bundleID)
         do {
@@ -3940,12 +3687,10 @@ final class Engine {
                 changes = SideStoreAnisetteHandoff.applySettings(to: &prefs)
             }
             guard !changes.isEmpty else { return }
-            log("Set \(appName)'s anisette the way SideStore's users get past Apple's -80046 and HTTP 503s: \(changes.joined(separator: ", ")) (/\(prefsPath)).")
-            // -22410 after a change of client info, until the identity is made
-            // again; unticking would put back the default, which gets 503s.
-            log("If \(appName)'s own sign-in still fails (-22410, -45061), use its Settings › User Customizations › Reset adi.pb, with “Keep header customizations” ticked, then sign in again.")
+            log("Set \(appName)'s anisette the way SideStore's users get past Apple's -80046: \(changes.joined(separator: ", ")) (/\(prefsPath)).")
+            log("If \(appName)'s own sign-in still fails, use its Settings › User Customizations › Reset adi.pb, with “Keep header customizations” unticked, then sign in again.")
         } catch {
-            log("⚠️ Couldn't set \(appName)'s anisette settings (\(short(error))). If its sign-in fails with -80046 or HTTP 503, turn off On-device Anisette and Auto Rotation in its settings, pick “SideStore (New)”, and set its client info to say “Mac OS X” where it says “macOS”.")
+            log("⚠️ Couldn't set \(appName)'s anisette settings (\(short(error))). If its sign-in fails with -80046, turn off On-device Anisette and Auto Rotation in its settings and pick “SideStore (New)”.")
         }
     }
 
@@ -4131,29 +3876,11 @@ final class Engine {
     // image and a session kept open while the location is simulated. Same
     // approach as StikDebug, over the RPPairing tunnel.
 
-    /// Connect, mount the developer disk image unless the device already has
-    /// one, and open the location session. Returns true when a mount actually
-    /// ran, so the UI can say so.
+    /// Connect, and mount the developer disk image unless the device already has
+    /// one. Returns true when a mount actually ran, so the UI can say so.
     @MainActor
     @discardableResult
     func prepareLocationSimulation(imagePath: String,
-                                   trustcachePath: String,
-                                   manifestPath: String,
-                                   progress: @escaping (Double) -> Void) async throws -> Bool {
-        let mounted = try await prepareDeveloperDiskImage(imagePath: imagePath,
-                                                          trustcachePath: trustcachePath,
-                                                          manifestPath: manifestPath,
-                                                          progress: progress)
-        try await onDeviceQueue { try self.connection.beginLocationSimulation() }
-        return mounted
-    }
-
-    /// Connect, and mount the developer disk image unless the device already
-    /// has one. Location simulation and JIT both need it: DVT and debugserver
-    /// come with it. Returns true when a mount actually ran.
-    @MainActor
-    @discardableResult
-    func prepareDeveloperDiskImage(imagePath: String,
                                    trustcachePath: String,
                                    manifestPath: String,
                                    progress: @escaping (Double) -> Void) async throws -> Bool {
@@ -4161,6 +3888,7 @@ final class Engine {
         let mounted = try await onDeviceQueue { try self.connection.mountedDeveloperImageCount() }
         if mounted > 0 {
             log("Developer disk image already mounted (\(mounted) image(s)).")
+            try await onDeviceQueue { try self.connection.beginLocationSimulation() }
             return false
         }
         log("No developer disk image mounted — mounting the personalized one…")
@@ -4171,6 +3899,7 @@ final class Engine {
                                                                progress: progress)
         }
         log("Developer disk image mounted.")
+        try await onDeviceQueue { try self.connection.beginLocationSimulation() }
         return true
     }
 
@@ -4195,20 +3924,6 @@ final class Engine {
             self.connection.endLocationSimulation()
         }
         log("Simulated location cleared.")
-    }
-
-    // MARK: - JIT tab
-    //
-    // A JIT session runs over a tunnel of its own (`JITSession`), so only the
-    // checks and the app list go through the shared connection.
-
-    /// Every app installed on the device, as installation_proxy reports them
-    /// (the JIT page keeps those that can be debugged). Opens the device link
-    /// first.
-    @MainActor
-    func installedAppPlists() async throws -> [[String: Any]] {
-        try await ensurePairingConnection()
-        return try await onDeviceQueue { try self.connection.installedAppPlists() }
     }
 
     // MARK: - Crash logs (Report a problem)
@@ -4399,42 +4114,45 @@ final class Engine {
     // MARK: 2FA bridge
 
     /// Called from a Rust worker thread with isideload's request as JSON; blocks
-    /// until the sheet answers this request. Writes the JSON answer into
-    /// `outBuf` and returns 1, or returns 0 to cancel.
+    /// until the sheet answers. Writes the JSON answer into `outBuf` and returns
+    /// 1, or returns 0 to cancel.
     ///
-    /// `ticket` is the sign-in asking. A request from an install's background
-    /// sign-in whose run has ended is declined, so no sheet appears after an
-    /// install stopped.
-    func answerTwoFactor(request json: UnsafePointer<CChar>?, outBuf: UnsafeMutablePointer<CChar>?, len: Int,
-                         for ticket: AppleSignInTicket) -> Int32 {
+    /// `run` is the run a background sign-in belongs to; a request from one whose
+    /// run has ended is declined, so no sheet appears after an install stopped.
+    func answerTwoFactor(request: UnsafePointer<CChar>?, outBuf: UnsafeMutablePointer<CChar>?, len: Int,
+                         run: Int? = nil) -> Int32 {
         guard let outBuf, len > 1 else { return 0 }
-        let prompt = json.flatMap { TwoFactorPrompt(json: String(cString: $0)) } ?? .deviceOnly
+        let prompt = request.flatMap { TwoFactorPrompt(json: String(cString: $0)) } ?? .deviceOnly
         // Don't cover a Trust prompt; the wait blocks, so never on main.
         if !Thread.isMainThread { attention.waitUntilFree() }
-        guard let request = twoFactorRequests.open(for: ticket) else {
-            // The queue lets one sign-in ask at a time, so this shouldn't happen.
-            // Declining stops the sign-in rather than leave it waiting on a
-            // sheet that shows another request.
-            ticket.markTwoFactorCancelled()
-            log("⚠️ \(ticket.purpose.name): 2FA requested while another sign-in waits for a code — declined.")
-            return 0
-        }
+        twoFactorLock.lock()
+        twoFactorAnswer = nil
+        awaitingTwoFactor = true
+        twoFactorLock.unlock()
         setMain {
-            // A cancel can land between opening the request and this block running.
-            guard self.twoFactorRequests.isWaiting(request.id) else { return }
+            // A cancel can land between the lock above and this block running.
+            self.twoFactorLock.lock()
+            let stillWaiting = self.awaitingTwoFactor
             // Checked here, on main, where a stopping run has already counted
             // itself finished by the time this block runs.
-            if let run = ticket.run, run < self.finishedRuns {
+            let abandoned = run.map { $0 < self.finishedRuns } ?? false
+            if abandoned { self.awaitingTwoFactor = false }
+            self.twoFactorLock.unlock()
+            guard stillWaiting else { return }
+            if abandoned {
                 self.log("2FA requested by the sign-in of an install that already stopped — declined.")
-                self.twoFactorRequests.cancel(request.id)   // no answer, so the sign-in aborts
+                self.twoFactorSem.signal()      // no answer, so the sign-in aborts
                 return
             }
-            self.twoFactor = TwoFactorPhase(request: request.id, signIn: ticket.id,
-                                            appleID: ticket.appleID, prompt: prompt)
+            self.twoFactor = .asking(prompt)
             self.log(prompt.logLine)
         }
-        guard let answer = twoFactorRequests.wait(request),
-              let bytes = answer.json.map({ Array($0.utf8) }), bytes.count < len else { return 0 }
+        twoFactorSem.wait()
+        twoFactorLock.lock()
+        let answer = twoFactorAnswer
+        twoFactorAnswer = nil
+        twoFactorLock.unlock()
+        guard let bytes = answer?.json.map({ Array($0.utf8) }), bytes.count < len else { return 0 }
         outBuf.withMemoryRebound(to: UInt8.self, capacity: len) { dst in
             for (i, b) in bytes.enumerated() { dst[i] = b }
             dst[bytes.count] = 0
@@ -4442,115 +4160,43 @@ final class Engine {
         return 1
     }
 
-    /// Hand the sheet's choice to the request it shows. The sheet stays up
-    /// showing progress until that sign-in's next prompt arrives or it returns.
-    func answerTwoFactor(_ answer: TwoFactorAnswer, to phase: TwoFactorPhase) {
-        // Not waiting anymore: answered already, or cancelled.
-        guard twoFactorRequests.answer(phase.request, with: answer) else { return }
-        if twoFactor?.request == phase.request { twoFactor?.answer = answer }
+    /// Hand the sheet's choice to the waiting sign-in. The sheet stays up showing
+    /// progress until the next prompt arrives or the sign-in returns.
+    func answerTwoFactor(_ answer: TwoFactorAnswer) {
+        twoFactorLock.lock()
+        guard awaitingTwoFactor else {
+            twoFactorLock.unlock()
+            return
+        }
+        awaitingTwoFactor = false
+        twoFactorAnswer = answer
+        twoFactorLock.unlock()
+        twoFactorWasCancelled = false
+        if case .asking(let prompt) = twoFactor { twoFactor = .working(prompt, answer) }
         log(answer.logLine)
+        twoFactorSem.signal()
     }
 
-    /// Close the sheet showing `phase`. While Apple waits on the user this
-    /// cancels that sign-in; mid-request it only hides, and the sign-in's next
-    /// prompt brings it back.
-    func cancelTwoFactor(_ phase: TwoFactorPhase) {
+    /// Close the sheet. While Apple waits on the user this cancels the sign-in;
+    /// mid-request it only hides, and a further prompt brings it back.
+    func cancelTwoFactor() {
         // Already closed because the sign-in returned: nothing to cancel.
-        guard twoFactor?.request == phase.request else { return }
+        guard twoFactor != nil else { return }
         twoFactor = nil
-        twoFactorRequests.cancel(phase.request)
+        twoFactorLock.lock()
+        let waiting = awaitingTwoFactor
+        awaitingTwoFactor = false
+        twoFactorAnswer = nil
+        twoFactorLock.unlock()
+        guard waiting else { return }
+        twoFactorWasCancelled = true
+        twoFactorSem.signal()
     }
 
-    /// Close the sheet once a sign-in attempt returns, however it went, if it
-    /// shows that sign-in's 2FA request or team question. Safe from any thread.
-    func endSignInQuestions(for ticket: AppleSignInTicket) {
-        setMain {
-            if self.twoFactor?.signIn == ticket.id { self.twoFactor = nil }
-            if self.teamQuestion?.signIn == ticket.id { self.teamQuestion = nil }
-        }
-    }
-
-    // MARK: Team bridge
-
-    /// What a sign-in stopped with when its team question was closed unanswered.
-    static var noTeamPickedMessage: String {
-        L("No developer team was picked, so the sign-in stopped.")
-    }
-
-    /// Called from a Rust worker thread with the Apple Account's teams as JSON,
-    /// when it's on more than one and none was picked for it; blocks until the
-    /// sheet answers. Writes the picked team's ID into `outBuf` and returns 1,
-    /// or returns 0 to stop the sign-in.
-    ///
-    /// Like a 2FA request, it waits while a Trust prompt has the user's
-    /// attention, and a question from an install's background sign-in whose
-    /// run has ended is declined.
-    func answerTeam(request json: UnsafePointer<CChar>?, outBuf: UnsafeMutablePointer<CChar>?, len: Int,
-                    for ticket: AppleSignInTicket) -> Int32 {
-        guard let outBuf, len > 1 else { return 0 }
-        guard let teams = json.flatMap({ DeveloperTeam.list(json: String(cString: $0)) }),
-              let suggested = DeveloperTeam.suggested(in: teams) else {
-            ticket.markTeamQuestionCancelled()
-            log("⚠️ \(ticket.purpose.name): couldn't read the developer teams Apple listed — stopping.")
-            return 0
-        }
-        // Don't cover a Trust prompt; the wait blocks, so never on main.
-        if !Thread.isMainThread { attention.waitUntilFree() }
-        guard let request = teamRequests.open(for: ticket) else {
-            // The queue lets one sign-in ask at a time, so this shouldn't happen.
-            ticket.markTeamQuestionCancelled()
-            log("⚠️ \(ticket.purpose.name): asked which team signs while another sign-in waits for an answer — declined.")
-            return 0
-        }
-        setMain {
-            // A cancel can land between opening the request and this block running.
-            guard self.teamRequests.isWaiting(request.id) else { return }
-            // Checked here, on main, where a stopping run has already counted
-            // itself finished by the time this block runs.
-            if let run = ticket.run, run < self.finishedRuns {
-                self.log("The sign-in of an install that already stopped asked which team signs — declined.")
-                self.teamRequests.cancel(request.id)   // no answer, so the sign-in stops
-                return
-            }
-            // The account got past two-factor, so the question takes the
-            // sheet over from it.
-            if self.twoFactor?.signIn == ticket.id { self.twoFactor = nil }
-            self.teamQuestion = TeamQuestion(request: request.id, signIn: ticket.id,
-                                             appleID: ticket.appleID, teams: teams,
-                                             suggested: suggested,
-                                             remembers: AccountStore.shared.isSaved(ticket.appleID))
-            let kinds = teams.map(\.kind.rawValue).joined(separator: ", ")
-            self.log("\(ticket.purpose.name): this Apple Account is on \(teams.count) developer teams (\(kinds)) — asking which signs.")
-        }
-        guard let answer = teamRequests.wait(request) else { return 0 }
-        let bytes = Array(answer.utf8)
-        guard bytes.count < len else { return 0 }
-        outBuf.withMemoryRebound(to: UInt8.self, capacity: len) { dst in
-            for (i, b) in bytes.enumerated() { dst[i] = b }
-            dst[bytes.count] = 0
-        }
-        return 1
-    }
-
-    /// Hand the sheet's pick to the question it shows, and remember it for the
-    /// Apple ID when the question says to.
-    func answerTeamQuestion(_ team: DeveloperTeam, to question: TeamQuestion) {
-        // Not waiting anymore: answered already, or cancelled.
-        guard teamRequests.answer(question.request, with: team.teamId) else { return }
-        if teamQuestion?.request == question.request { teamQuestion = nil }
-        if question.remembers {
-            AccountStore.shared.remember(team, for: question.appleID)
-        }
-        let kind = team.kind == .unknown ? "" : "\(team.kind.rawValue) "
-        log("Signing with the \(kind)team \(team.named)\(question.remembers ? ", from now on for this Apple ID" : "").")
-    }
-
-    /// Close the team sheet showing `question`, which stops its sign-in.
-    func cancelTeamQuestion(_ question: TeamQuestion) {
-        // Already closed because the sign-in returned: nothing to cancel.
-        guard teamQuestion?.request == question.request else { return }
-        teamQuestion = nil
-        teamRequests.cancel(question.request)
+    /// Close the sheet once a sign-in attempt returns, however it went. Safe from
+    /// any thread.
+    func endTwoFactor() {
+        setMain { self.twoFactor = nil }
     }
     // MARK: - Storage
 
@@ -4608,7 +4254,7 @@ final class Engine {
         }
     }
 
-    /// Run a closure on the main queue (for observed state changed off-thread).
+    /// Run a closure on the main queue (for @Published mutations off-thread).
     func setMain(_ work: @escaping () -> Void) {
         if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
     }
@@ -4775,25 +4421,6 @@ enum Guides {
             actionLabel: nil, actionURLString: nil)
     }
 
-    /// Shown when the build couldn't be downloaded because GitHub can't be
-    /// reached from here: blocked, filtered or cut off. Where a VPN app is the
-    /// way to GitHub, it can't carry the download, since LocalDevVPN holds the
-    /// one VPN iOS runs. A copy fetched another way goes in as a custom IPA,
-    /// which SideInstaller recognizes and sets up like its own download.
-    static func githubUnreachable(source: InstallSource, link: URL) -> Guide {
-        Guide(
-            title: L("Bring the .ipa yourself"),
-            systemImage: "tray.and.arrow.down",
-            steps: [
-                L("If you reach GitHub through a VPN or proxy app, turn off LocalDevVPN and turn that one on: iOS runs only one VPN at a time."),
-                L("Tap “Get the .ipa” below and save the file, or download it on another device and bring it over."),
-                L("Back in SideInstaller, pick Custom .ipa under Install, tap “Import .ipa” and choose the file. SideInstaller recognizes %@ and sets it up just like its own download.",
-                  source.displayName),
-                L("Turn LocalDevVPN back on, then tap Install."),
-            ],
-            actionLabel: L("Get the .ipa"), actionURLString: link.absoluteString)
-    }
-
     static var pairing: Guide {
         // The Live Activity, or the notification standing in for it, puts the
         // code over Settings; without either it's only in the app.
@@ -4874,15 +4501,15 @@ enum Guides {
     private static let idevicePairURL = "https://github.com/jkcoxson/idevice_pair/releases/latest"
 
     /// Shown when Apple refuses a certificate because one exists (error 7460).
-    /// When SideStore's certificate can be had, using it comes first.
-    static func certExists(sideStoreCertificate: Bool) -> Guide {
+    /// With SideStore on the iPhone, using its certificate comes first.
+    static func certExists(sideStoreInstalled: Bool) -> Guide {
         Guide(
             title: L("A signing certificate already exists"),
             systemImage: "exclamationmark.shield",
             steps: [
                 L("Apple returned error 7460: this Apple ID already has an iOS development certificate, or a request for one is still pending."),
                 L("SideInstaller couldn't reuse it. That happens when the certificate was issued somewhere else — AltStore, SideStore, Sideloadly or Xcode on another device — so the private key it needs isn't on this iPhone."),
-                sideStoreCertificate
+                sideStoreInstalled
                     ? L("If SideStore made it, tap “Use SideStore's certificate” above: SideInstaller signs with that one too, and nothing is revoked.")
                     : nil,
                 L("Use “Revoke and retry” above, or open Certificates in the Tools tab, tap “Load certificates”, and revoke it there."),
@@ -4944,18 +4571,6 @@ enum Guides {
         return guide
     }
 
-    /// The trust step for AltStore, then what it needs to install and refresh
-    /// apps without a computer: its Remote AltServer, whose setup skips pairing
-    /// when the pairing file is already inside.
-    static func trustAltStore(holdingPairing: Bool) -> Guide {
-        var guide = trust(appName: AltStorePairingHandoff.appName)
-        guide.steps[guide.steps.count - 1] = L("Open AltStore from your Home Screen and sign in with your Apple ID.")
-        guide.steps.append(holdingPairing
-            ? L("To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings. Its pairing file is already in place, so the setup skips pairing.")
-            : L("To install and refresh apps without a computer, tap “Set up Remote AltServer” in AltStore's Settings and follow its steps."))
-        return guide
-    }
-
     /// Shown after a LiveContainer install, which needs SideStore's certificate.
     static var liveContainerImport: Guide {
         Guide(
@@ -4972,19 +4587,19 @@ enum Guides {
 
 // MARK: - C logging callback
 
-/// Forwards Rust log lines to the activity log, which redacts them off the
-/// main thread.
+/// Forwards Rust log lines to the engine on the main queue.
 private let siLogCallback: SILogCallback = { _, msg in
     guard let msg = msg else { return }
-    LogStore.shared.append("[rust] " + String(cString: msg))
+    let text = String(cString: msg)
+    DispatchQueue.main.async {
+        Engine.shared.appendRustLine(text)
+    }
 }
 
-/// The 2FA callback every Apple ID sign-in hands Rust, with its
-/// `AppleSignInTicket` as the context, so the sheet answers each request for
-/// the sign-in that made it.
-let appleSignInTwoFactorCallback: SITwoFactorCb = { ctx, request, outBuf, bufLen in
-    guard let ticket = AppleSignInTicket.from(context: ctx) else { return 0 }
-    return Engine.shared.answerTwoFactor(request: request, outBuf: outBuf, len: Int(bufLen), for: ticket)
+/// Bridges isideload's 2FA request to the engine's blocking prompt.
+private let twoFactorCallback: SITwoFactorCb = { ctx, request, outBuf, bufLen in
+    Engine.shared.answerTwoFactor(request: request, outBuf: outBuf, len: Int(bufLen),
+                                  run: ctx.map { Int(bitPattern: $0) - 1 })
 }
 
 /// Counts what currently has the user's attention — a Trust prompt — so a 2FA
@@ -5145,19 +4760,17 @@ enum TwoFactorAnswer: Equatable {
     }
 }
 
-/// The two-factor sheet's state: the request it shows, whose it is, and
-/// where it stands.
-struct TwoFactorPhase: Equatable {
-    /// The request the sheet answers (`TwoFactorRequests`).
-    let request: Int
-    /// The sign-in that made it (`AppleSignInTicket.id`).
-    let signIn: Int
-    /// The Apple ID the code is for.
-    let appleID: String
-    let prompt: TwoFactorPrompt
-    /// The answer the sign-in is acting on; nil while Apple waits on the user.
-    var answer: TwoFactorAnswer?
+/// The two-factor sheet's state.
+enum TwoFactorPhase: Equatable {
+    /// Apple is waiting on the user.
+    case asking(TwoFactorPrompt)
+    /// The user answered and the sign-in is acting on it.
+    case working(TwoFactorPrompt, TwoFactorAnswer)
 
-    var isAsking: Bool { answer == nil }
+    var prompt: TwoFactorPrompt {
+        switch self {
+        case .asking(let prompt), .working(let prompt, _): prompt
+        }
+    }
 }
 

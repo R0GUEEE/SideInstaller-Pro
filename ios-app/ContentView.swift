@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// The Install screen: an Apple ID, a build, and a step timeline while it runs.
 struct ContentView: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     @EnvironmentObject private var updateChecker: UpdateChecker
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
@@ -73,7 +73,7 @@ struct ContentView: View {
                 .animation(.smooth(duration: 0.35), value: engine.wifiConnected)
                 // The surface's change of shape, and what it pushes along.
                 .animation(.smooth(duration: 0.45), value: showProgress)
-                .animation(.smooth(duration: 0.4), value: engine.finished)
+                .animation(.smooth(duration: 0.4, extraBounce: 0.12), value: engine.finished)
                 .animation(.smooth(duration: 0.35), value: engine.deviceSummary)
                 .animation(.smooth(duration: 0.3), value: engine.isRunning)
                 .animation(.smooth(duration: 0.35), value: engine.importedPairingName)
@@ -327,22 +327,22 @@ struct ContentView: View {
         }
     }
 
-    /// A stable identity so the dot cross-fades when its meaning changes.
-    private var statusDotID: String {
+    /// A stable identity so the pill cross-fades when its meaning changes.
+    private var statusPillID: String {
         engine.deviceSummary ?? (engine.vpnConnected ? "up" : "down")
     }
 
     @ViewBuilder
-    private var statusDot: some View {
+    private var statusPill: some View {
         if let summary = engine.deviceSummary {
-            StatusDot(text: summary, color: Theme.positive)
+            StatusPill(text: summary, systemImage: "iphone", color: .green)
         } else if engine.vpnConnected {
-            StatusDot(text: L("Tunnel connected"), color: Theme.positive)
+            StatusPill(text: L("Tunnel connected"), systemImage: "checkmark.shield.fill", color: .green)
         } else if engine.startsVPNWhenNeeded {
             // Install starts it, so this isn't a problem to flag.
-            StatusDot(text: L("Tunnel off"), color: Theme.warning, idle: true)
+            StatusPill(text: L("Tunnel off"), systemImage: "shield.slash.fill", color: .orange, glass: true)
         } else {
-            StatusDot(text: L("Tunnel off"), color: Theme.negative)
+            StatusPill(text: L("Tunnel off"), systemImage: "shield.slash.fill", color: .red)
         }
     }
 
@@ -352,24 +352,24 @@ struct ContentView: View {
     private var footer: some View {
         Text(L("an app by Frizzle"))
             .font(.caption)
-            .foregroundStyle(Theme.muted)
+            .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
-            .padding(.top, 8)
+            .padding(.top, 10)
     }
 
     // MARK: Update banner
 
     /// Notice shown when GitHub advertises a newer version than this build.
     private var updateBanner: some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "arrow.up.circle")
-                        .font(.title3)
-                        .foregroundStyle(Theme.accent)
+        CalloutCard(tint: Theme.accent) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Theme.brand)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L("Update available"))
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                         Text(L("SideInstaller %@ is available — you're on %@.",
                                updateChecker.latestVersion ?? "", updateChecker.currentVersion))
                             .font(.footnote)
@@ -381,13 +381,12 @@ struct ContentView: View {
                         updateChecker.dismiss()
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.footnote.weight(.semibold))
+                            .font(.footnote.weight(.bold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 28)
-                            .background(Circle().fill(Theme.control))
-                            .contentShape(Circle())
+                            .padding(6)
+                            .background(Circle().fill(.white.opacity(0.08)))
                     }
-                    .buttonStyle(.plain, sound: .dismiss)
+                    .buttonStyle(.plain)
                 }
                 Menu {
                     updateOptions
@@ -396,8 +395,8 @@ struct ContentView: View {
                         Text(L("Get the latest version"))
                         Image(systemName: "chevron.down")
                     }
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Theme.accent)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Theme.accent2)
                 }
             }
         }
@@ -600,7 +599,6 @@ struct ContentView: View {
             }
             // On the whole card, so it also resizes smoothly when a slot goes.
             .animation(.smooth(duration: 0.28), value: engine.installSource)
-            .animation(.smooth(duration: 0.28), value: engine.stableReleased)
         }
         .disabled(engine.isRunning)
         // The menus name the release, so the catalog is fetched when the card
@@ -950,45 +948,28 @@ struct ContentView: View {
 
     /// The two ways in for a custom build: pick a file, or paste a link.
     private var importControl: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             filePickerButton
-            if let build = engine.customIPABuild, !engine.isImportingIPA {
-                recognizedNote(build)
-            }
             orDivider
             linkField
         }
-        .animation(.smooth(duration: 0.25), value: engine.customIPABuild)
-    }
-
-    /// Says the imported IPA is one of SideInstaller's own builds, which the
-    /// install sets up just like its download: a LiveContainer + SideStore
-    /// brought from elsewhere gets its pairing file where SideStore reads it.
-    private func recognizedNote(_ build: InstallSource) -> some View {
-        Text(L("SideInstaller recognizes this as %@ and sets it up just like its own download.",
-               build.displayName))
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .transition(.opacity)
     }
 
     /// "or" divider between the file picker and the link field.
     private var orDivider: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             hairline
             Text(L("or"))
-                .font(.caption)
-                .foregroundStyle(Theme.muted)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
             hairline
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
     }
 
     private var hairline: some View {
         Rectangle()
-            .fill(Theme.hairline)
+            .fill(Color(.separator))
             .frame(height: 1)
     }
 
@@ -1003,9 +984,9 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: engine.customIPAName == nil
-                          ? "square.and.arrow.down" : "checkmark.circle")
+                          ? "square.and.arrow.down" : "checkmark.circle.fill")
                         .contentTransition(.symbolEffect(.replace))
-                        .foregroundStyle(engine.customIPAName == nil ? Color.secondary : Theme.accent)
+                        .foregroundStyle(engine.customIPAName == nil ? Color.secondary : Theme.accent2)
                 }
                 Text(importLabel)
                     .lineLimit(1)
@@ -1014,14 +995,14 @@ struct ContentView: View {
                 Spacer()
                 if engine.customIPAName != nil, !engine.isImportingIPA {
                     Text(L("Replace"))
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(Theme.accent)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.accent2)
                 }
             }
             .fieldBackground()
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain, sound: .tap)
+        .buttonStyle(.plain)
         .disabled(engine.isImportingIPA)
     }
 
@@ -1038,7 +1019,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "link")
-                    .font(.footnote.weight(.medium))
+                    .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
                 TextField(L("Paste a download link"), text: $ipaLink)
                     .textFieldStyle(.plain)
@@ -1055,21 +1036,21 @@ struct ContentView: View {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain, sound: .tick)
+                    .buttonStyle(.plain)
                 }
                 Button(action: downloadFromLink) {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.title3)
-                        .foregroundStyle(linkIsUsable ? Theme.accent : Color.secondary.opacity(0.5))
+                        .foregroundStyle(linkIsUsable ? Theme.accent2 : Color.secondary.opacity(0.5))
                 }
-                .buttonStyle(.plain, sound: .tap)
+                .buttonStyle(.plain)
                 .disabled(!linkIsUsable)
             }
             .fieldBackground()
             // Progress bar for link downloads (file copies report no progress).
             if engine.isImportingIPA, let fraction = engine.importProgress {
                 ProgressView(value: fraction)
-                    .tint(Theme.accent)
+                    .tint(Theme.accent2)
             }
         }
         .animation(.smooth(duration: 0.25), value: engine.importProgress == nil)
@@ -1092,10 +1073,10 @@ struct ContentView: View {
     /// The Install button and the progress card it turns into, as one surface:
     /// starting a run reshapes the button instead of swapping it for a card.
     /// Only the two sets of content cross-fade; the surface itself changes
-    /// size and corners, and the button's blue gives way to the card's fill.
+    /// size and corners, and the button's gradient gives way to the card's
+    /// fill.
     private var installSurface: some View {
-        let shape = RoundedRectangle(cornerRadius: showProgress ? Theme.cardRadius : Theme.controlRadius,
-                                     style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: showProgress ? 22 : 18, style: .continuous)
         return ZStack(alignment: .top) {
             if showProgress {
                 progressContent
@@ -1108,28 +1089,30 @@ struct ContentView: View {
                     installLabel
                         .font(.headline)
                         .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(PressReportingButtonStyle(isPressed: $installPressed), sound: .press)
+                .buttonStyle(PressReportingButtonStyle(isPressed: $installPressed))
                 .transition(.surfaceSwap)
             }
         }
         .frame(maxWidth: .infinity)
         // Clips the incoming content to the surface while it's still growing.
         .clipShape(shape)
-        // The button's blue, which gives way to the card's fill.
+        // The button's gradient and glow, which give way to the card's fill.
         .background(
             shape
-                .fill(Theme.blue)
+                .fill(Theme.brand)
+                .shadow(color: Theme.accent.opacity(0.4), radius: 16, x: 0, y: 8)
                 .opacity(showProgress ? 0 : 1)
         )
         .cardSurface(in: shape, shown: showProgress)
         // The press `PrimaryButtonStyle` draws, kept apart from the reshaping.
-        .animation(.smooth(duration: 0.15)) { surface in
+        .animation(.snappy(duration: 0.22)) { surface in
             surface
-                .scaleEffect(surfacePressed ? 0.98 : 1)
-                .opacity(surfacePressed ? 0.85 : 1)
+                .scaleEffect(surfacePressed ? 0.97 : 1)
+                .opacity(surfacePressed ? 0.92 : 1)
         }
         .alert(L("Cancel the install?"), isPresented: $confirmingCancel) {
             Button(L("Yes"), role: .destructive) { engine.cancelOneClick() }
@@ -1160,8 +1143,8 @@ struct ContentView: View {
     }
 
     private var installLabel: some View {
-        HStack(spacing: 8) {
-            Image(systemName: engine.finished ? "arrow.clockwise" : "square.and.arrow.down")
+        HStack(spacing: 10) {
+            Image(systemName: engine.finished ? "arrow.clockwise" : "square.and.arrow.down.fill")
                 .contentTransition(.symbolEffect(.replace))
             Text(engine.finished ? L("Reinstall") : L("Install %@", installTargetName))
         }
@@ -1177,15 +1160,15 @@ struct ContentView: View {
 
     /// Shown when iOS is below the minimum supported version.
     private var osRequirement: some View {
-        PanelCard {
-            HStack(alignment: .top, spacing: 12) {
+        CalloutCard(tint: .red) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "iphone.gen3.slash")
-                    .font(.title3)
-                    .foregroundStyle(Theme.negative)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 4) {
+                    .font(.title2)
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(L("iOS %@ required", Engine.minimumTunnelOSText))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                     Text(L("This iPhone runs iOS %@, which SideInstaller can't install on. Update to iOS %@ or later in Settings › General › Software Update.",
                            engine.osVersionText, Engine.minimumTunnelOSText))
                         .font(.footnote)
@@ -1208,16 +1191,16 @@ struct ContentView: View {
         PanelCard {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    sectionTitle(L("Pairing file"), systemImage: "lock.doc")
+                    sectionTitle(L("Pairing file"), systemImage: "lock.doc.fill")
                     Spacer(minLength: 4)
                     if engine.importedPairingName != nil {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundStyle(Theme.positive)
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundStyle(.green)
                     }
                 }
 
                 pairingImportButton
-                if engine.canGetSideStorePairing {
+                if engine.sideStoreInstalled {
                     orDivider
                     sideStorePairingButton
                 }
@@ -1228,11 +1211,9 @@ struct ContentView: View {
     }
 
     /// Asks SideStore for the pairing file it already has. SideStore opens and
-    /// sends it back, and the import asks before replacing anything. Inside
-    /// LiveContainer nothing opens: the built-in SideStore's file is read.
+    /// sends it back, and the import asks before replacing anything.
     private var sideStorePairingButton: some View {
-        let insideLiveContainer = Engine.runsInLiveContainer
-        return VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Button { engine.requestSideStorePairing() } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.uturn.backward.circle")
@@ -1240,20 +1221,16 @@ struct ContentView: View {
                     Text(L("Get it from SideStore"))
                         .foregroundStyle(.primary)
                     Spacer()
-                    if !insideLiveContainer {
-                        Image(systemName: "arrow.up.forward.app")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(Theme.accent)
-                    }
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.accent2)
                 }
                 .fieldBackground()
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain, sound: .tap)
+            .buttonStyle(.plain)
             .disabled(engine.isImportingPairing)
-            Text(insideLiveContainer
-                 ? L("SideInstaller takes the pairing file LiveContainer's built-in SideStore has.")
-                 : L("SideStore opens and sends back the pairing file it has."))
+            Text(L("SideStore opens and sends back the pairing file it has."))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1269,10 +1246,10 @@ struct ContentView: View {
                 Text(L("How do I make one?"))
                 Image(systemName: "arrow.up.right")
             }
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(Theme.accent)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(Theme.accent2)
         }
-        .buttonStyle(.plain, sound: .tick)
+        .buttonStyle(.plain)
     }
 
     /// Import button, labelled with the imported file's name once one is in.
@@ -1283,9 +1260,9 @@ struct ContentView: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: engine.importedPairingName == nil
-                          ? "square.and.arrow.down" : "checkmark.circle")
+                          ? "square.and.arrow.down" : "checkmark.circle.fill")
                         .contentTransition(.symbolEffect(.replace))
-                        .foregroundStyle(engine.importedPairingName == nil ? Color.secondary : Theme.accent)
+                        .foregroundStyle(engine.importedPairingName == nil ? Color.secondary : Theme.accent2)
                 }
                 Text(engine.importedPairingName ?? L("Import pairing file"))
                     .lineLimit(1)
@@ -1294,14 +1271,14 @@ struct ContentView: View {
                 Spacer()
                 if engine.importedPairingName != nil, !engine.isImportingPairing {
                     Text(L("Replace"))
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(Theme.accent)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Theme.accent2)
                 }
             }
             .fieldBackground()
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain, sound: .tap)
+        .buttonStyle(.plain)
         .disabled(engine.isImportingPairing)
     }
 
@@ -1316,15 +1293,15 @@ struct ContentView: View {
 
     /// Shown while Wi-Fi is off, which pairing needs.
     private var wifiRequirement: some View {
-        PanelCard {
-            HStack(alignment: .top, spacing: 12) {
+        CalloutCard(tint: .red) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "wifi.slash")
-                    .font(.title3)
-                    .foregroundStyle(Theme.negative)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 4) {
+                    .font(.title2)
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(L("Wi-Fi required"))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                     Text(L("Connect to a Wi-Fi network. Pairing this iPhone needs it — SideInstaller has to be findable on the local network."))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -1339,15 +1316,15 @@ struct ContentView: View {
     /// Shown while the tunnel is off. Names LocalDevVPN, though any loopback VPN
     /// works.
     private var vpnRequirement: some View {
-        PanelCard {
-            HStack(alignment: .top, spacing: 12) {
+        CalloutCard(tint: .red) {
+            HStack(alignment: .top, spacing: 14) {
                 Image(systemName: "shield.lefthalf.filled")
-                    .font(.title3)
-                    .foregroundStyle(Theme.negative)
-                    .frame(width: 28)
-                VStack(alignment: .leading, spacing: 4) {
+                    .font(.title2)
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse)
+                VStack(alignment: .leading, spacing: 6) {
                     Text(L("LocalDevVPN required"))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                     Text(L("Install LocalDevVPN and connect it. The install runs over its tunnel."))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -1355,11 +1332,12 @@ struct ContentView: View {
                     if let label = Guides.vpn.actionLabel, let url = Guides.vpn.actionURL {
                         Button { openURL(url) } label: {
                             Label(label, systemImage: "arrow.up.right")
-                                .font(.footnote.weight(.medium))
+                                .font(.footnote.weight(.semibold))
                         }
-                        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .padding(.top, 8)
+                        .tint(.red)
+                        .padding(.top, 2)
                     }
                 }
             }
@@ -1391,7 +1369,7 @@ struct ContentView: View {
                     .contentTransition(.numericText(value: engine.overallProgress))
                 if engine.isRunning {
                     cancelButton
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .scale(scale: 0.6)))
                 }
                 stepsDisclosure
             }
@@ -1432,23 +1410,28 @@ struct ContentView: View {
             confirmingCancel = true
         } label: {
             Image(systemName: "xmark")
-                .font(.footnote.weight(.semibold))
+                .font(.footnote.weight(.bold))
                 .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Theme.control))
+                .padding(7)
+                .background(Circle().fill(.white.opacity(0.08)))
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain, sound: .tap)
+        .buttonStyle(.plain)
         .disabled(engine.isCancelling)
         .opacity(engine.isCancelling ? 0.4 : 1)
         .accessibilityLabel(L("Cancel"))
     }
 
-    /// Progress color: red on failure, green when finished, the blue while
+    /// Progress color: red on failure, green when finished, brand blue while
     /// running.
     private var progressTint: Color {
-        if runFailed { return Theme.negative }
-        return engine.finished ? Theme.positive : Theme.accent
+        if runFailed { return .red }
+        return engine.finished ? .green : Theme.accent
+    }
+
+    private var progressGradient: LinearGradient {
+        if runFailed { return Theme.gradient(.red) }
+        return engine.finished ? Theme.gradient(.green) : Theme.brand
     }
 
     /// Chevron that expands/collapses the step timeline. Placed in the header so
@@ -1460,18 +1443,18 @@ struct ContentView: View {
             disclosureChevron(expanded: stepsExpanded)
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain, sound: .tick)
+        .buttonStyle(.plain)
         .accessibilityLabel(stepsExpanded ? L("Show fewer steps") : L("Show all steps"))
     }
 
     /// Circled chevron that flips to point up while its section is open.
     private func disclosureChevron(expanded: Bool) -> some View {
         Image(systemName: "chevron.down")
-            .font(.footnote.weight(.semibold))
+            .font(.footnote.weight(.bold))
             .foregroundStyle(.secondary)
             .rotationEffect(.degrees(expanded ? 180 : 0))
-            .frame(width: 28, height: 28)
-            .background(Circle().fill(Theme.control))
+            .padding(7)
+            .background(Circle().fill(.white.opacity(0.08)))
     }
 
     // MARK: Step timeline
@@ -1512,9 +1495,12 @@ struct ContentView: View {
                 .transition(.push(from: .bottom))
         }
         // Fixed, so the card doesn't breathe as one row replaces another.
-        .frame(height: 44)
-        // Clipped for the push transition.
+        .frame(height: 46)
+        // Clip only vertically (for the push transition); the active node's
+        // halo grows past the row's leading edge and must not be cut.
+        .padding(.horizontal, 10)
         .clipped()
+        .padding(.horizontal, -10)
         .contentShape(Rectangle())
         .onTapGesture { stepsExpanded = true }
         .animation(.smooth(duration: 0.35), value: step)
@@ -1523,7 +1509,12 @@ struct ContentView: View {
     // MARK: Helpers
 
     private func sectionTitle(_ title: String, systemImage: String) -> some View {
-        SectionTitle(title: title, systemImage: systemImage)
+        Label {
+            Text(title).font(.headline)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(Theme.brand)
+        }
     }
 }
 
@@ -1535,7 +1526,7 @@ struct ContentView: View {
 struct InstallPopup: View {
     let popup: Engine.Popup
 
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
     /// Shared with the Certificates page; revoke-and-retry runs through it.
@@ -1557,22 +1548,22 @@ struct InstallPopup: View {
             guidePopup(guide)
         case .error(let message, let stoppedRun):
             PopupCard(title: Self.errorTitle(stoppedRun: stoppedRun),
-                      systemImage: "exclamationmark.triangle",
-                      tint: Theme.negative,
+                      systemImage: "exclamationmark.triangle.fill",
+                      tint: .red,
                       onClose: close) {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                     Text(message)
                         .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
                     ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 8) { errorButtons(message) }
-                        VStack(alignment: .leading, spacing: 12) { errorButtons(message) }
+                        HStack(spacing: 10) { errorButtons(message) }
+                        VStack(alignment: .leading, spacing: 10) { errorButtons(message) }
                     }
                 }
             }
             .sheet(isPresented: $showReport) { ReportProblemView() }
         case .success(let name, let leads):
-            PopupCard(title: L("Installed"), systemImage: "checkmark.seal", tint: Theme.positive,
+            PopupCard(title: L("Installed"), systemImage: "checkmark.seal.fill", tint: .green,
                       onClose: close) {
                 Text(leads ? L("%@ is installed. Finish the trust step below to open it.", name)
                            : L("%@ is installed. Finish the trust step above to open it.", name))
@@ -1597,9 +1588,10 @@ struct InstallPopup: View {
     private func errorButtons(_ message: String) -> some View {
         Button { showReport = true } label: {
             Label(L("Report this problem"), systemImage: "exclamationmark.bubble")
-                .font(.subheadline.weight(.medium))
+                .font(.subheadline.weight(.semibold))
         }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+        .buttonStyle(.bordered)
+        .tint(.red)
         if engine.guide == nil, !engine.certConflict, !ErrorHelp.isExplained(message) {
             CopyLogsButton()
         }
@@ -1616,14 +1608,15 @@ struct InstallPopup: View {
     private func guidePopup(_ guide: Guide) -> some View {
         PopupCard(title: guide.title, systemImage: guide.systemImage, tint: Theme.accent,
                   onClose: close) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 NumberedSteps(steps: guide.steps)
                 if let label = guide.actionLabel, let url = guide.actionURL {
                     Button { openURL(url) } label: {
                         Label(label, systemImage: "arrow.up.right")
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                     }
-                    .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                    .buttonStyle(.bordered)
+                    .tint(Theme.accent)
                 }
             }
         }
@@ -1634,12 +1627,12 @@ struct InstallPopup: View {
     /// What signing an imported IPA costs in App IDs and how many are left,
     /// before the run signs it. With too few left, it can only be cancelled.
     private func appIDCostPopup(_ cost: AppIDCost) -> some View {
-        PopupCard(title: L("App IDs for this app"), systemImage: "number.square",
-                  tint: cost.isAffordable ? Theme.accent : Theme.warning,
+        PopupCard(title: L("App IDs for this app"), systemImage: "number.square.fill",
+                  tint: cost.isAffordable ? Theme.accent : .orange,
                   onClose: close) {
             VStack(alignment: .leading, spacing: 16) {
-                HStack(spacing: 8) {
-                    appIDTile(L("Cost"), "\(cost.cost)", tint: cost.isAffordable ? .primary : Theme.warning)
+                HStack(spacing: 10) {
+                    appIDTile(L("Cost"), "\(cost.cost)", tint: cost.isAffordable ? .primary : .orange)
                     appIDTile(L("Left now"), cost.available.map { "\($0)" } ?? "–", tint: .primary)
                     appIDTile(L("Left after"),
                               cost.isAffordable ? cost.remainingAfter.map { "\($0)" } ?? "–" : "–",
@@ -1652,7 +1645,7 @@ struct InstallPopup: View {
                 if !cost.newIDs.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L("New App IDs"))
-                            .font(.caption.weight(.medium))
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         ForEach(cost.newIDs, id: \.self) { id in
                             Text(id)
@@ -1662,20 +1655,20 @@ struct InstallPopup: View {
                         }
                     }
                 }
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     if cost.isAffordable {
                         Button { engine.answerAppIDCost(true) } label: {
-                            Label(L("Install"), systemImage: "arrow.down.app")
+                            Label(L("Install"), systemImage: "arrow.down.app.fill")
                         }
                         .buttonStyle(PrimaryButtonStyle())
                     }
                     Button(role: .cancel) { engine.answerAppIDCost(false) } label: {
                         Text(L("Cancel"))
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(SecondaryButtonStyle(tint: cost.isAffordable ? nil : Theme.warning),
-                                 sound: .tap)
+                    .buttonStyle(.bordered)
+                    .tint(cost.isAffordable ? Color.secondary : .orange)
                 }
             }
         }
@@ -1683,9 +1676,9 @@ struct InstallPopup: View {
 
     /// One number in the App ID cost popup, with what it counts.
     private func appIDTile(_ label: String, _ value: String, tint: Color) -> some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 2) {
             Text(value)
-                .font(.title2.weight(.medium).monospacedDigit())
+                .font(.title2.weight(.bold).monospacedDigit())
                 .foregroundStyle(tint)
             Text(label)
                 .font(.caption)
@@ -1694,11 +1687,9 @@ struct InstallPopup: View {
                 .minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 12)
-        .background(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            .fill(Theme.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            .strokeBorder(Theme.hairline, lineWidth: 1))
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color.primary.opacity(0.06)))
     }
 
     private func appIDCostMessage(_ cost: AppIDCost) -> String {
@@ -1727,7 +1718,7 @@ struct InstallPopup: View {
     private func linkPopup(_ link: DeepLink) -> some View {
         switch link {
         case .install(let url):
-            PopupCard(title: L("Install from a link?"), systemImage: "link",
+            PopupCard(title: L("Install from a link?"), systemImage: "link.circle.fill",
                       tint: Theme.accent, onClose: close) {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -1746,18 +1737,18 @@ struct InstallPopup: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    linkButtons(L("Download and install"), systemImage: "arrow.down.app")
+                    linkButtons(L("Download and install"), systemImage: "arrow.down.app.fill")
                 }
             }
         case .pairingFile(let file):
             PopupCard(title: file.fromSideStore ? L("Use SideStore's pairing file?")
                                                 : L("Import this pairing file?"),
-                      systemImage: "lock.doc", tint: Theme.accent, onClose: close) {
+                      systemImage: "lock.doc.fill", tint: Theme.accent, onClose: close) {
                 VStack(alignment: .leading, spacing: 16) {
                     if let udid = file.kind.udid {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("UDID")
-                                .font(.caption.weight(.medium))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
                             Text(udid)
                                 .font(.caption.monospaced())
@@ -1769,7 +1760,7 @@ struct InstallPopup: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    linkButtons(L("Import"), systemImage: "square.and.arrow.down")
+                    linkButtons(L("Import"), systemImage: "square.and.arrow.down.fill")
                 }
             }
         case .source:
@@ -1779,14 +1770,14 @@ struct InstallPopup: View {
         case .certificate:
             // Only an unasked-for one asks here; SideStore's reply is imported
             // straight away.
-            PopupCard(title: L("Sign with this certificate?"), systemImage: "checkmark.seal",
+            PopupCard(title: L("Sign with this certificate?"), systemImage: "checkmark.seal.fill",
                       tint: Theme.accent, onClose: close) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(L("A link sent SideInstaller a signing certificate. Only use it if you asked for one: SideInstaller will sign apps with it from now on, in place of its own. It's used only if it's one of your Apple ID's certificates."))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    linkButtons(L("Use it"), systemImage: "checkmark.seal")
+                    linkButtons(L("Use it"), systemImage: "checkmark.seal.fill")
                 }
             }
         }
@@ -1794,17 +1785,18 @@ struct InstallPopup: View {
 
     /// The link popup's go-ahead and Cancel.
     private func linkButtons(_ title: String, systemImage: String) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             Button { engine.answerLink(true) } label: {
                 Label(title, systemImage: systemImage)
             }
             .buttonStyle(PrimaryButtonStyle())
             Button(role: .cancel) { engine.answerLink(false) } label: {
                 Text(L("Cancel"))
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+            .buttonStyle(.bordered)
+            .tint(.secondary)
         }
     }
 
@@ -1815,16 +1807,9 @@ struct InstallPopup: View {
     }
 
     private func pairingLinkMessage(_ file: LinkedPairingFile) -> String {
-        let base: String
-        if !file.fromSideStore {
-            base = L("A link sent SideInstaller a pairing file. Only import it if you asked for one: SideInstaller will connect to this iPhone with it.")
-        } else if Engine.runsInLiveContainer {
-            // SideStore's reply can't get there, so it's the file read from
-            // the built-in SideStore.
-            base = L("This is the pairing file LiveContainer's built-in SideStore has. SideInstaller will connect to this iPhone with it.")
-        } else {
-            base = L("SideStore sent back the pairing file it has. SideInstaller will connect to this iPhone with it.")
-        }
+        let base = file.fromSideStore
+            ? L("SideStore sent back the pairing file it has. SideInstaller will connect to this iPhone with it.")
+            : L("A link sent SideInstaller a pairing file. Only import it if you asked for one: SideInstaller will connect to this iPhone with it.")
         if let current = engine.importedPairingName {
             return base + " " + L("It replaces %@.", current)
         }
@@ -1833,34 +1818,33 @@ struct InstallPopup: View {
 
     // MARK: Certificate conflict (Apple error 7460)
 
-    /// Shown on error 7460. With SideStore's certificate to be had, the first
-    /// button gets it (from SideStore, or inside LiveContainer from
-    /// LiveContainer), signs with that and retries the install. The other
-    /// loads the certificates; the dialog asks which one to revoke, then
-    /// retries the install.
+    /// Shown on error 7460. With SideStore on the iPhone, the first button
+    /// asks it for its certificate, signs with that and retries the install.
+    /// The other loads the certificates; the dialog asks which one to revoke,
+    /// then retries the install.
     private var certConflictPopup: some View {
-        let sideStoreCertificate = engine.canUseSideStoreCertificate
+        let sideStoreInstalled = engine.sideStoreInstalled
         return PopupCard(title: L("A certificate already exists"),
-                         systemImage: "exclamationmark.shield",
-                         tint: Theme.warning,
+                         systemImage: "exclamationmark.shield.fill",
+                         tint: .orange,
                          onClose: close) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(sideStoreCertificate
+            VStack(alignment: .leading, spacing: 14) {
+                Text(sideStoreInstalled
                      ? L("Apple won't issue a second signing certificate for this Apple ID. If SideStore made the one it has, SideInstaller can sign with that one too, and nothing is revoked. Revoking it lets the install continue as well — but it can't be undone.")
                      : L("Apple won't issue a second signing certificate for this Apple ID. Revoking the one it already has lets the install continue — but it can't be undone."))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if sideStoreCertificate {
+                if sideStoreInstalled {
                     Button {
                         certManager.requestSideStoreCertificate(retryInstall: true)
                     } label: {
                         HStack(spacing: 8) {
                             if certManager.isImporting {
-                                ProgressView()
+                                ProgressView().tint(.white)
                                 Text(L("Checking the certificate"))
                             } else {
-                                Image(systemName: "checkmark.seal")
+                                Image(systemName: "checkmark.seal.fill")
                                 Text(L("Use SideStore's certificate"))
                             }
                         }
@@ -1881,10 +1865,11 @@ struct InstallPopup: View {
                             Text(L("Revoke and retry"))
                         }
                     }
-                    .font(.subheadline.weight(.medium))
+                    .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SecondaryButtonStyle(tint: Theme.warning), sound: .tap)
+                .buttonStyle(.bordered)
+                .tint(.orange)
                 .disabled(certManager.isBusy)
                 // A failed load, revoke or import shows as the Certificates
                 // popup, under this one.
@@ -1960,27 +1945,78 @@ private extension AnyTransition {
 
 // MARK: - Progress bar
 
-/// Install progress bar: one solid fill on a quiet track, growing as the run
-/// goes. Side by Side shows its runs with it too.
-struct InstallProgressBar: View {
+/// Install progress bar: a gradient fill with a moving sheen and a glowing head
+/// while running. Both effects are driven by `TimelineView` time rather than a
+/// repeating animation, so progress changes don't disrupt them.
+private struct InstallProgressBar: View {
     let progress: Double
     let tint: Color
+    let gradient: LinearGradient
+    /// False once the run has finished or stopped, leaving the bar at rest.
+    let animating: Bool
+
+    /// Width of the moving highlight.
+    private let sheenWidth: CGFloat = 96
+    /// Seconds per sheen pass.
+    private let sheenPeriod: Double = 1.9
 
     var body: some View {
         GeometryReader { geo in
             let full = geo.size.width
             // Minimum width so the bar is visible at 0%.
-            let filled = max(8, full * min(max(progress, 0), 1))
+            let filled = max(12, full * min(max(progress, 0), 1))
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Theme.control)
-                Capsule()
-                    .fill(tint)
+                    .fill(Color(.tertiarySystemFill))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.05), lineWidth: 1))
+                fill(across: full)
                     .frame(width: filled)
                     .animation(.smooth(duration: 0.45), value: filled)
             }
         }
-        .frame(height: 8)
+        .frame(height: 12)
+    }
+
+    private func fill(across full: CGFloat) -> some View {
+        TimelineView(.animation(paused: !animating)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            Capsule()
+                .fill(gradient)
+                // A lit top edge, which gives the pill some depth.
+                .overlay(Capsule().fill(LinearGradient(colors: [.white.opacity(0.28), .clear],
+                                                       startPoint: .top, endPoint: .bottom)))
+                // Overlays, not siblings: the sheen can be wider than the fill,
+                // and as a sibling it would stretch the fill past the track.
+                .overlay(alignment: .leading) { if animating { sheen(at: t, across: full) } }
+                .overlay(alignment: .trailing) { if animating { head(at: t) } }
+                // Keeps the sheen's blend inside the fill instead of over the card.
+                .compositingGroup()
+                .clipShape(Capsule())
+        }
+        .shadow(color: tint.opacity(0.5), radius: 9)
+    }
+
+    /// Highlight that moves across the full track width, so its speed doesn't
+    /// depend on progress. The capsule clips it to the filled part.
+    private func sheen(at t: TimeInterval, across full: CGFloat) -> some View {
+        let phase = t.truncatingRemainder(dividingBy: sheenPeriod) / sheenPeriod
+        return Rectangle()
+            .fill(LinearGradient(stops: [.init(color: .white.opacity(0), location: 0),
+                                         .init(color: .white.opacity(0.5), location: 0.5),
+                                         .init(color: .white.opacity(0), location: 1)],
+                                 startPoint: .leading, endPoint: .trailing))
+            .frame(width: sheenWidth)
+            .offset(x: -sheenWidth + (full + sheenWidth * 2) * phase)
+            .blendMode(.plusLighter)
+    }
+
+    /// A soft light at the head of the fill, breathing while it works.
+    private func head(at t: TimeInterval) -> some View {
+        Capsule()
+            .fill(.white)
+            .frame(width: 5)
+            .blur(radius: 3)
+            .opacity(0.45 + 0.35 * sin(t * 3.4))
     }
 }
 
@@ -1995,35 +2031,35 @@ private struct StepRow: View {
     let isLast: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 14) {
             timelineColumn
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text(title)
-                        .font(.subheadline)
+                        .font(.subheadline.weight(state == .pending ? .regular : .medium))
                         .foregroundStyle(state == .pending ? .secondary : .primary)
                     Spacer()
                     StepBadge(step: step, state: state, installProgress: installProgress)
                 }
-                .frame(minHeight: 24)
-                if !isLast { Spacer(minLength: 12) }
+                .frame(minHeight: 28)
+                if !isLast { Spacer(minLength: 14) }
             }
         }
         .animation(.smooth(duration: 0.3), value: state)
     }
 
-    /// The node plus the line that runs down to the next node.
+    /// The node plus the connecting line that runs down to the next node.
     private var timelineColumn: some View {
         VStack(spacing: 0) {
             StepNode(state: state)
             if !isLast {
                 Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(width: 1)
+                    .fill(state == .done ? Color.green.opacity(0.5) : Color(.tertiarySystemFill))
+                    .frame(width: 2)
                     .frame(maxHeight: .infinity)
             }
         }
-        .frame(width: 24)
+        .frame(width: 28)
     }
 }
 
@@ -2040,15 +2076,15 @@ private struct CurrentStepRow: View {
     let total: Int
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             StepNode(state: state)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.subheadline)
+                    .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                 Text(L("Step %@ of %@", "\(index)", "\(total)"))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(Theme.muted)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
             StepBadge(step: step, state: state, installProgress: installProgress)
@@ -2059,19 +2095,31 @@ private struct CurrentStepRow: View {
 
 // MARK: - Step parts
 
-/// Status mark for a step, used by both timelines and by Side by Side's: an
-/// empty ring while it waits its turn, the system spinner while it runs, and
-/// a check, a cross or a hand once it has an outcome.
-struct StepNode: View {
+/// Status circle for a step, used by both timelines. The active step gets a
+/// pulsing halo.
+private struct StepNode: View {
     let state: StepState
 
     var body: some View {
         ZStack {
-            Circle().fill(fill)
-            Circle().strokeBorder(stroke, lineWidth: 1)
+            if state == .active { halo }
+            Circle().fill(nodeFill).frame(width: 28, height: 28)
+            Circle().strokeBorder(nodeStroke, lineWidth: 1.5).frame(width: 28, height: 28)
             icon
         }
-        .frame(width: 24, height: 24)
+        .frame(width: 28, height: 28)
+    }
+
+    /// Driven by clock time rather than a repeating animation.
+    private var halo: some View {
+        TimelineView(.animation) { timeline in
+            let p = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 1.6) / 1.6
+            Circle()
+                .strokeBorder(Theme.accent.opacity(0.75 * (1 - p)), lineWidth: 2)
+                .frame(width: 28, height: 28)
+                .scaleEffect(1 + 0.5 * p)
+        }
     }
 
     @ViewBuilder
@@ -2080,51 +2128,54 @@ struct StepNode: View {
         case .active:
             ProgressView()
                 .controlSize(.small)
-                .scaleEffect(0.8)
-                .transition(.opacity)
-        case .pending:
-            EmptyView()
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
         default:
             Image(systemName: iconName)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(color)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(iconColor)
                 .contentTransition(.symbolEffect(.replace))
-                .transition(.opacity)
+                .symbolEffect(.bounce, options: .nonRepeating, value: state == .done)
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
         }
     }
 
     private var iconName: String {
         switch state {
-        case .waiting: "hand.tap"
-        case .failed:  "xmark"
-        default:       "checkmark"
+        case .pending: return "circle"
+        case .active:  return "circle"          // unused (ProgressView shown)
+        case .waiting: return "hand.tap.fill"
+        case .done:    return "checkmark"
+        case .failed:  return "xmark"
         }
     }
 
-    /// The mark's colour. A finished step is quiet, so the one in flight and
-    /// one that needs the user stand out.
-    private var color: Color {
+    private var iconColor: Color {
         switch state {
-        case .failed:  Theme.negative
-        case .waiting: Theme.warning
-        default:       .secondary
+        case .pending: return Color(.tertiaryLabel)
+        case .active:  return Theme.accent
+        case .waiting: return .white
+        case .done:    return .white
+        case .failed:  return .white
         }
     }
 
-    private var fill: Color {
+    private var nodeFill: Color {
         switch state {
-        case .done:            Theme.control
-        case .failed, .waiting: color.opacity(0.14)
-        default:               .clear
+        case .done:    return .green
+        case .failed:  return .red
+        case .waiting: return .orange
+        // Nothing of its own: the card shows through.
+        default:       return .clear
         }
     }
 
-    private var stroke: Color {
+    private var nodeStroke: Color {
         switch state {
-        case .pending: Theme.ice.opacity(0.18)
-        case .active:  Theme.accent
-        case .done:    Theme.hairline
-        default:       color.opacity(0.4)
+        case .pending: return Color(.separator)
+        case .active:  return Theme.accent
+        case .waiting: return .orange
+        case .done:    return .green
+        case .failed:  return .red
         }
     }
 }
@@ -2139,16 +2190,19 @@ private struct StepBadge: View {
     var body: some View {
         if step == .install, state == .active {
             Text("\(Int(installProgress * 100))%")
-                .font(.caption.monospacedDigit())
+                .font(.caption.monospacedDigit().weight(.medium))
                 .foregroundStyle(Theme.accent)
                 .contentTransition(.numericText(value: installProgress))
                 .animation(.smooth(duration: 0.3), value: installProgress)
                 .transition(.opacity)
         } else if state == .waiting {
             Text(L("Action needed"))
-                .font(.caption.weight(.medium))
-                .foregroundStyle(Theme.warning)
-                .transition(.opacity)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.orange)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.orange.opacity(0.16)))
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
         }
     }
 }

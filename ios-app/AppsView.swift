@@ -48,10 +48,6 @@ struct ProvisioningProfile: Identifiable, @unchecked Sendable, Equatable {
     /// True when the App ID is a wildcard (ends in `*`).
     var isWildcard: Bool { applicationIdentifier.hasSuffix("*") }
 
-    /// True for an App Store distribution profile, the kind TestFlight builds
-    /// carry. Nothing can be sideloaded with one, so the page leaves it out.
-    var isAppStoreDistribution: Bool { entitlements["beta-reports-active"] as? Bool == true }
-
     /// Calendar days until expiry (1 = tomorrow); negative once expired.
     var daysRemaining: Int? {
         guard let expirationDate else { return nil }
@@ -176,16 +172,8 @@ struct SideloadedApp: Identifiable, Equatable, @unchecked Sendable {
         let bundleName = plist["CFBundleName"] as? String
         self.name = display?.isEmpty == false ? display! : (bundleName?.isEmpty == false ? bundleName! : bundleID)
         self.version = plist["CFBundleShortVersionString"] as? String
+        let entitlements = plist["Entitlements"] as? [String: Any]
         self.applicationIdentifier = entitlements?["application-identifier"] as? String
-    }
-
-    /// Whether an app came from TestFlight: Apple signed it (only App Store and
-    /// TestFlight builds carry Apple's own signer) or it has the
-    /// `beta-reports-active` entitlement, which only App Store distribution
-    /// profiles grant. Neither is ever true of a sideloaded app.
-    static func isFromTestFlight(signer: String?, entitlements: [String: Any]?) -> Bool {
-        if let signer, signer.hasPrefix("Apple iPhone OS Application Signing") { return true }
-        return entitlements?["beta-reports-active"] as? Bool == true
     }
 }
 
@@ -226,21 +214,20 @@ enum ExpiryUrgency {
 
     var color: Color {
         switch self {
-        case .expired, .critical: return Theme.negative
-        case .soon:               return Theme.warning
-        // Between the warning and the positive, toned like them.
-        case .later:              return Color(red: 214 / 255, green: 194 / 255, blue: 86 / 255)
-        case .comfortable:        return Theme.positive
+        case .expired, .critical: return .red
+        case .soon:               return .orange
+        case .later:              return .yellow
+        case .comfortable:        return .green
         case .unknown:            return .secondary
         }
     }
 
     var symbol: String {
         switch self {
-        case .expired:  return "exclamationmark.triangle"
-        case .critical: return "clock.badge.exclamationmark"
+        case .expired:  return "exclamationmark.triangle.fill"
+        case .critical: return "clock.badge.exclamationmark.fill"
         case .unknown:  return "questionmark.circle"
-        default:        return "clock"
+        default:        return "clock.fill"
         }
     }
 
@@ -389,22 +376,8 @@ struct RefreshJob: Identifiable, Equatable {
 
 /// Drives the Sideloaded apps page: loads installed apps and profiles from the
 /// device, matches them, and runs "Refresh all" through the install pipeline.
-///
-/// One for the app, so the Shortcuts actions (AppsShortcuts.swift) see and
-/// refresh the same apps as the page.
 @MainActor
 final class SideloadedAppsManager: ObservableObject {
-
-    static let shared = SideloadedAppsManager()
-
-    /// How a refresh run went.
-    struct RefreshOutcome {
-        /// Why the run couldn't start (no device link, or no sign-in).
-        var failure: String?
-        /// The apps it went through, each `done` or `failed`.
-        var jobs: [RefreshJob] = []
-        var refreshed: Int { jobs.filter { $0.state == .done }.count }
-    }
 
     @Published private(set) var entries: [SideloadedAppStatus] = []
     /// Profiles belonging to no installed app — deleted apps' leftovers.
@@ -437,16 +410,11 @@ final class SideloadedAppsManager: ObservableObject {
 
     private var engine: Engine { Engine.shared }
 
-    /// Silent audio, so a refresh a shortcut started with SideInstaller in the
-    /// background isn't suspended halfway, as the location page keeps it
-    /// running.
-    private let keepAlive = KeepAlive()
-
     /// Keeps `autoLoad` to a single attempt.
     private var didAutoLoad = false
 
     /// The refresh in flight, kept so it can be called off between apps.
-    private var refreshTask: Task<RefreshOutcome, Never>?
+    private var refreshTask: Task<Void, Never>?
 
     /// What went wrong last, as a popup `RootView` stacks over the app.
     var popups: [ToolPopup] { lastError.map { [.error($0)] } ?? [] }
@@ -556,7 +524,7 @@ final class SideloadedAppsManager: ObservableObject {
                 loadIcons(for: apps.map(\.bundleID))
                 engine.log("Sideloaded apps: \(apps.count) sideloaded, \(inventory.profiles.count) profile(s) decoded.")
             } catch {
-                let message = Self.text(for: error)
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
                 if quiet {
                     engine.log("Sideloaded apps: not ready yet (\(message))")
                 } else {
@@ -734,7 +702,7 @@ final class SideloadedAppsManager: ObservableObject {
         refreshStatus = L("Getting ready")
         engine.log("=== Refresh all: \(jobs.count) app(s) ===")
 
-        let task = Task { () -> RefreshOutcome in
+        refreshTask = Task {
             defer {
                 isRefreshing = false
                 refreshStatus = nil
@@ -744,10 +712,10 @@ final class SideloadedAppsManager: ObservableObject {
                 try await engine.prepareRefresh()
             } catch {
                 let message = Self.text(for: error)
-                if showsFailure { lastError = message }
+                lastError = message
                 engine.log("⛔️ Refresh all: \(message)")
                 jobs = []
-                return RefreshOutcome(failure: message)
+                return
             }
 
             var refreshed = 0
@@ -783,72 +751,11 @@ final class SideloadedAppsManager: ObservableObject {
                                   : L("Nothing was refreshed."))
                 : L("Refreshed %d of %d apps.", refreshed, jobs.count)
             engine.log("Refresh all finished: \(refreshed)/\(jobs.count) refreshed.")
-            let outcome = RefreshOutcome(jobs: jobs)
             // Read the device again, so the days on screen are the new ones.
             if refreshed > 0 {
                 isRefreshing = false        // `load` won't run while a refresh holds the link
                 load(quiet: true)
             }
-            return outcome
-        }
-        refreshTask = task
-        return task
-    }
-
-    // MARK: - Shortcuts
-
-    /// Reads the device afresh for a Shortcuts action, once the page's own
-    /// load or refresh is done.
-    func loadForShortcut() async throws {
-        try await waitUntilIdle()
-        isWorking = true
-        defer { isWorking = false }
-        lastError = nil
-        try await performLoad()
-    }
-
-    /// Reads the device afresh, then refreshes the refreshable apps whose
-    /// bundle ids are in `bundleIDs`, or all of them when it's nil, as Refresh
-    /// all does. Returns once the last one is done.
-    func refreshForShortcut(_ bundleIDs: Set<String>? = nil) async throws -> RefreshOutcome {
-        try await loadForShortcut()
-        guard !engine.isRunning else {
-            throw EngineError.message(L("An install is already running. Wait for it to finish, then refresh."))
-        }
-        let selected = bundleIDs.map { ids in refreshable.filter { ids.contains($0.bundleID) } }
-            ?? refreshable
-        guard !selected.isEmpty else {
-            if entries.isEmpty {
-                throw EngineError.message(L("Nothing on this device was installed with a provisioning profile. App Store apps don't expire, so they aren't listed here."))
-            }
-            let names = entries.filter { bundleIDs?.contains($0.app.bundleID) ?? true }.map(\.app.name)
-            // An app picked in a shortcut may be gone since: its bundle ID, then.
-            let named = names.isEmpty ? (bundleIDs ?? []).sorted() : names
-            throw EngineError.message(L("%@ can't be refreshed: SideInstaller has no IPA to sign it again from. Refresh it in whatever installed it, or import its .ipa into SideInstaller first.",
-                                        named.joined(separator: ", ")))
-        }
-        // A load from the page may have started meanwhile.
-        try await waitUntilIdle()
-        // Signing in, signing and installing each app outlast the time iOS
-        // gives an action in the background.
-        keepAlive.startAudio()
-        defer { keepAlive.stopAudio() }
-        let run = startRefresh(selected, showsFailure: false)
-        // Stopping the shortcut stops the run after the app being refreshed,
-        // as the page's Stop does.
-        let outcome = await withTaskCancellationHandler {
-            await run.value
-        } onCancel: {
-            run.cancel()
-        }
-        if let failure = outcome.failure { throw EngineError.message(failure) }
-        return outcome
-    }
-
-    /// Returns once the page isn't loading or refreshing.
-    private func waitUntilIdle() async throws {
-        while isWorking || isRefreshing {
-            try await Task.sleep(for: .milliseconds(250))
         }
     }
 
@@ -927,7 +834,7 @@ struct AppsView: View {
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
     /// Observed for `installProgress` during a refresh.
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     @ObservedObject var manager: SideloadedAppsManager
     /// The debugger-backed JIT session, shown in its own card.
     @ObservedObject private var jit = JITSession.shared
@@ -1014,13 +921,14 @@ struct AppsView: View {
                     })) {
             if manager.hasLoaded {
                 let expiring = manager.expiringSoon
-                StatusDot(text: expiring > 0
+                StatusPill(text: expiring > 0
                              ? (expiring == 1 ? L("%d app needs refreshing", expiring)
                                               : L("%d apps need refreshing", expiring))
                              : (manager.entries.count == 1 ? L("%d app", manager.entries.count)
                                                            : L("%d apps", manager.entries.count)),
-                          color: expiring > 0 ? Theme.warning : Theme.positive)
-                    .transition(.opacity)
+                           systemImage: expiring > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                           color: expiring > 0 ? .orange : .green)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
             }
         }
     }
@@ -1174,7 +1082,7 @@ struct AppsView: View {
             PanelCard {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L("Refresh all"))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                     // Enumerated so rows redraw on a language change.
                     ForEach(Array(manager.jobs.enumerated()), id: \.element.id) { _, job in
@@ -1194,14 +1102,14 @@ struct AppsView: View {
     }
 
     private func jobRow(_ job: RefreshJob) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
                 jobIcon(job.state)
                 Text(job.name)
-                    .font(.caption.weight(.medium))
+                    .font(.caption.weight(.semibold))
                 Spacer(minLength: 6)
                 Text(Self.stateText(job.state))
-                    .font(.caption2.weight(.medium))
+                    .font(.caption2.weight(.semibold))
                     .foregroundStyle(Self.stateColor(job.state))
             }
             if case let .failed(message) = job.state {
@@ -1216,10 +1124,10 @@ struct AppsView: View {
     @ViewBuilder
     private func jobIcon(_ state: RefreshJob.State) -> some View {
         switch state {
-        case .pending:  Image(systemName: "clock").foregroundStyle(Theme.muted)
+        case .pending:  Image(systemName: "clock").foregroundStyle(.tertiary)
         case .working:  ProgressView().controlSize(.small)
-        case .done:     Image(systemName: "checkmark.circle").foregroundStyle(Theme.positive)
-        case .failed:   Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.negative)
+        case .done:     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .failed:   Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
         }
     }
 
@@ -1235,8 +1143,8 @@ struct AppsView: View {
     private static func stateColor(_ state: RefreshJob.State) -> Color {
         switch state {
         case .pending, .working: return .secondary
-        case .done:              return Theme.positive
-        case .failed:            return Theme.negative
+        case .done:              return .green
+        case .failed:            return .red
         }
     }
 
@@ -1251,7 +1159,7 @@ struct AppsView: View {
                  : L("%d apps here have no IPA in SideInstaller, so they can't be refreshed from this page. Refresh them in whatever installed them, or import their .ipa first.",
                      manager.unrefreshable))
                 .font(.caption)
-                .foregroundStyle(Theme.muted)
+                .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .cascadeItem(5 + manager.entries.count)
@@ -1309,14 +1217,14 @@ struct AppsView: View {
                     Text(manager.entries.count == 1
                          ? L("%d app", manager.entries.count)
                          : L("%d apps", manager.entries.count))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let refreshed = manager.lastRefreshed {
                         Text(refreshed.formatted(Date.FormatStyle(date: .omitted, time: .shortened)
                                                      .locale(Localizer.locale)))
                             .font(.caption)
-                            .foregroundStyle(Theme.muted)
+                            .foregroundStyle(.tertiary)
                     }
                 }
                 .cascadeItem(4)
@@ -1628,8 +1536,8 @@ struct AppsView: View {
                 }
                 .buttonStyle(.plain)
                 Image(systemName: "chevron.right")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.muted)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
         }
     }
@@ -1666,11 +1574,11 @@ struct AppsView: View {
     /// The one line that matters: how long is left, and the date it runs out.
     @ViewBuilder
     private func expiryLabel(_ profile: ProvisioningProfile?, urgency: ExpiryUrgency) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Image(systemName: urgency.symbol)
             Text(ExpiryUrgency.text(for: profile))
         }
-        .font(.caption.weight(.medium))
+        .font(.caption.weight(.semibold))
         .foregroundStyle(urgency.color)
         .padding(.top, 1)
     }
@@ -1680,7 +1588,7 @@ struct AppsView: View {
             VStack(spacing: 8) {
                 Image(systemName: "questionmark.app.dashed")
                     .font(.largeTitle)
-                    .foregroundStyle(Theme.muted)
+                    .foregroundStyle(Theme.brand)
                 Text(L("No sideloaded apps"))
                     .font(.headline)
                 Text(L("Nothing on this device was installed with a provisioning profile. App Store apps don't expire, so they aren't listed here."))

@@ -1,61 +1,26 @@
 import SwiftUI
 
-/// The app's shared visual language: a ramp of night blues, three blues
-/// with a job each, and the cards, buttons and headers every screen is
-/// composed from.
-///
-/// The surfaces are navy so dark they read as night, and the blues are kept
-/// apart by what they do: `navy` for the logo art and the wash at the top of
-/// a page, `blue` for what's filled behind white (the main button), `accent`
-/// for what's drawn on the dark (progress, links, the selection). Depth comes
-/// from a step between surfaces and a hairline edge.
+/// The app's shared visual language: brand colours, gradients and the cards,
+/// buttons and headers every screen is composed from.
 enum Theme {
-    // MARK: Ramp
+    /// Primary brand colour, a deep blue.
+    static let accent = Color(red: 0.13, green: 0.44, blue: 0.96)
+    /// Secondary brand colour, the far end of the gradient.
+    static let accent2 = Color(red: 0.30, green: 0.68, blue: 1.0)
+    /// Deep-navy halo behind each header icon, matching the icon art (#011A5C).
+    static let glow = Color(red: 1 / 255, green: 26 / 255, blue: 92 / 255)
 
-    /// The page behind everything: a navy so deep it reads as black until a
-    /// card sits on it.
-    static let page = Color(red: 5 / 255, green: 11 / 255, blue: 24 / 255)
-    /// A card on the page.
-    static let card = Color(red: 13 / 255, green: 21 / 255, blue: 36 / 255)
-    /// One step above a card: popups, which float over the dimmed app.
-    static let raised = Color(red: 20 / 255, green: 30 / 255, blue: 49 / 255)
-    /// The pale blue that controls and edges are drawn in, faintly, so they
-    /// stay in the ramp's hue instead of greying it.
-    static let ice = Color(red: 185 / 255, green: 211 / 255, blue: 249 / 255)
-    /// A control's fill, a step up from whatever it sits on.
-    static let control = ice.opacity(0.07)
-    /// The edge of a card or control.
-    static let hairline = ice.opacity(0.1)
-    /// Captions, meta and quiet icons: a slate blue, at least 4.5:1 on a
-    /// popup and more on a card.
-    static let muted = Color(red: 127 / 255, green: 141 / 255, blue: 165 / 255)
+    /// The signature diagonal gradient used for the logo, CTA and accents.
+    static var brand: LinearGradient {
+        LinearGradient(colors: [accent, accent2],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
 
-    // MARK: Colour
-
-    /// The deep blue of the logo art's patterns, and of the wash at the top
-    /// of every page.
-    static let navy = Color(red: 9 / 255, green: 50 / 255, blue: 143 / 255)
-    /// The filled blue: the main button and a ticked box. White on it reads
-    /// at 4.8:1.
-    static let blue = Color(red: 38 / 255, green: 105 / 255, blue: 237 / 255)
-    /// The light blue drawn on the dark: progress, the selection, links and
-    /// a card's label icon. At least 6:1 on every surface above.
-    static let accent = Color(red: 96 / 255, green: 167 / 255, blue: 253 / 255)
-    /// Done, connected, granted.
-    static let positive = Color(red: 76 / 255, green: 195 / 255, blue: 138 / 255)
-    /// Something needs the user, or will soon.
-    static let warning = Color(red: 229 / 255, green: 161 / 255, blue: 64 / 255)
-    /// Failed, missing, can't be undone.
-    static let negative = Color(red: 229 / 255, green: 72 / 255, blue: 77 / 255)
-
-    // MARK: Shape
-
-    /// Corner radius of a control: a field, a button, a row.
-    static let controlRadius: CGFloat = 12
-    /// Corner radius of a card.
-    static let cardRadius: CGFloat = 20
-    /// Corner radius of a popup.
-    static let popupRadius: CGFloat = 24
+    /// A diagonal gradient built from any tint, for tinted glyphs.
+    static func gradient(_ color: Color) -> LinearGradient {
+        LinearGradient(colors: [color, color.opacity(0.72)],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
 
     /// The widest a page's column grows, its padding included. A phone is
     /// narrower than this; a wider window, such as an open iPhone Duo (about
@@ -76,38 +41,144 @@ extension View {
     }
 }
 
+// MARK: - Backdrop level
+
+/// Shared backdrop darkness level and its animation between tabs.
+///
+/// Each page draws its own `AppBackground`, and pages overlap during a tab
+/// change, so the state lives here: start level, target level and start time.
+/// Every backdrop computes its value from the clock, so all copies show the
+/// same frame.
+@MainActor
+enum Backdrop {
+    /// Opacity of the black overlay on the mesh: bright (Install, About) or
+    /// dark (Tools).
+    enum Level: Double, CaseIterable {
+        case bright = 0
+        case dark   = 0.55
+    }
+
+    /// Duration of a full bright ↔ dark transition.
+    private static let fullTravel: TimeInterval = 0.55
+
+    /// Largest gap between levels. Shorter moves get proportionally less time,
+    /// so all transitions run at the same speed.
+    private static let span = (Level.allCases.map(\.rawValue).max() ?? 1)
+                            - (Level.allCases.map(\.rawValue).min() ?? 0)
+
+    private static var origin = Level.bright.rawValue
+    private static var target = Level.bright.rawValue
+    /// Far enough in the past that the first frame is at rest on `bright`.
+    private static var departed = -Double.greatestFiniteMagnitude
+    /// Duration of the current move, scaled to its distance.
+    private static var travel = fullTravel
+
+    /// Starts animating to `level` from the current value, so switching tabs
+    /// mid-transition reverses smoothly. No-op if already heading to `level`.
+    static func settle(on level: Level) {
+        guard target != level.rawValue else { return }
+        let now = Date.timeIntervalSinceReferenceDate
+        origin = wash(at: now)
+        target = level.rawValue
+        departed = now
+        // Scale duration by distance, so a mid-transition reversal isn't slow.
+        travel = fullTravel * min(1, abs(target - origin) / span)
+    }
+
+    /// The wash at `t`, on a smoothstep so it both leaves and arrives at rest.
+    static func wash(at t: TimeInterval) -> Double {
+        guard travel > 0 else { return target }
+        let p = min(max((t - departed) / travel, 0), 1)
+        return origin + (target - origin) * (p * p * (3 - 2 * p))
+    }
+}
+
 // MARK: - Background
 
-/// The page every screen sits on: the night-blue page with a wash of navy at
-/// the top, where each page's logo tile and title sit, gone by the middle of
-/// a phone's screen. Still: nothing in it moves.
+/// The app's backdrop: OLED black under a slow, low-opacity blue mesh gradient
+/// whose control points sway on sine waves, and over that the tab's `Backdrop`
+/// wash.
 struct AppBackground: View {
     var body: some View {
-        Theme.page
-            .overlay(alignment: .top) {
-                EllipticalGradient(colors: [Theme.navy.opacity(0.4), Theme.navy.opacity(0)],
-                                   center: .top, startRadiusFraction: 0, endRadiusFraction: 1)
-                    .frame(height: 480)
+        // Ticks every frame, with the points derived from the clock so the
+        // motion is continuous rather than resetting on a keyframe.
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            ZStack {
+                Color.black
+                mesh(at: t)
+                    .blur(radius: 24)
+                    // Low enough to read as a deep tint rather than a light.
+                    .opacity(0.2)
+                // Off the same clock as the mesh, so every page's copy of this
+                // backdrop is at the identical point of the transition.
+                Color.black.opacity(Backdrop.wash(at: t))
             }
             .ignoresSafeArea()
+        }
+    }
+
+    /// The blue layer: the swaying mesh, or on iOS 17 (no `MeshGradient`) a
+    /// radial bloom that follows the mesh's centre point.
+    @ViewBuilder
+    private func mesh(at t: TimeInterval) -> some View {
+        let points = meshPoints(at: t)
+        if #available(iOS 18.0, *) {
+            MeshGradient(width: 3, height: 3, points: points, colors: meshColors)
+        } else {
+            let centre = points[4]
+            RadialGradient(colors: [Theme.accent2, Theme.accent, Theme.glow],
+                           center: UnitPoint(x: CGFloat(centre.x), y: CGFloat(centre.y)),
+                           startRadius: 0, endRadius: 600)
+        }
+    }
+
+    /// Deep-navy corners with brighter blue blooms through the middle.
+    private let meshColors: [Color] = [
+        Theme.glow,    Theme.accent,   Theme.glow,
+        Theme.accent2, Theme.accent,   Theme.accent2,
+        Theme.glow,    Theme.accent2,  Theme.glow,
+    ]
+
+    /// A 3×3 grid of control points: corners pinned so the gradient fills the
+    /// screen, the rest swaying on out-of-phase sine waves.
+    private func meshPoints(at t: TimeInterval) -> [SIMD2<Float>] {
+        func osc(_ base: Double, _ amp: Double, _ speed: Double, _ phase: Double) -> Float {
+            Float(base + amp * sin(t * speed + phase))
+        }
+        return [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(osc(0.5, 0.18, 0.625, 0.0), 0),
+            SIMD2<Float>(1, 0),
+            SIMD2<Float>(0, osc(0.5, 0.18, 0.55, 1.0)),
+            SIMD2<Float>(osc(0.5, 0.12, 0.75, 2.0), osc(0.5, 0.12, 0.675, 3.0)),
+            SIMD2<Float>(1, osc(0.5, 0.18, 0.60, 4.0)),
+            SIMD2<Float>(0, 1),
+            SIMD2<Float>(osc(0.5, 0.18, 0.65, 5.0), 1),
+            SIMD2<Float>(1, 1),
+        ]
     }
 }
 
 // MARK: - Cards
 
-/// The container every section sits in.
+/// The neutral container every section sits in.
 struct PanelCard<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         content()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(20)
-            .cardSurface(in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+            .padding(18)
+            .cardSurface(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 }
 
-/// What a card is made of: a step up from the page, and a hairline edge.
+/// What a card is made of: a pane of glass with nothing in it. The backdrop
+/// shows through untouched, under the faintest wash, and the pane is drawn by
+/// its rim: lit along the top, dim down the sides, catching a little light
+/// again at the foot. Drawn by hand, since the system's glass and materials
+/// all frost what's behind them, which over this backdrop reads as gray.
 private struct CardSurface<S: InsettableShape>: ViewModifier {
     var shape: S
     /// False takes the surface away without changing the view, for one that
@@ -116,8 +187,22 @@ private struct CardSurface<S: InsettableShape>: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .background(shape.fill(Theme.card.opacity(shown ? 1 : 0)))
-            .overlay(shape.strokeBorder(Theme.hairline.opacity(shown ? 1 : 0), lineWidth: 1))
+            .background(shape.fill(wash))
+            .overlay(shape.strokeBorder(rim, lineWidth: 1))
+    }
+
+    /// A sheen that fades out down the pane, so it has a surface at all.
+    private var wash: LinearGradient {
+        LinearGradient(colors: [.white.opacity(shown ? 0.025 : 0), .clear],
+                       startPoint: .top, endPoint: .bottom)
+    }
+
+    private var rim: LinearGradient {
+        LinearGradient(stops: [.init(color: .white.opacity(shown ? 0.38 : 0), location: 0),
+                               .init(color: .white.opacity(shown ? 0.08 : 0), location: 0.35),
+                               .init(color: .white.opacity(shown ? 0.05 : 0), location: 0.8),
+                               .init(color: .white.opacity(shown ? 0.18 : 0), location: 1)],
+                       startPoint: .top, endPoint: .bottom)
     }
 }
 
@@ -125,6 +210,26 @@ extension View {
     /// Puts a card's surface behind this view, cut to `shape`.
     func cardSurface(in shape: some InsettableShape, shown: Bool = true) -> some View {
         modifier(CardSurface(shape: shape, shown: shown))
+    }
+}
+
+/// A `PanelCard` washed in a tint, for guidance, errors and success.
+struct CalloutCard<Content: View>: View {
+    var tint: Color
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(tint.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(tint.opacity(0.35), lineWidth: 1)
+            )
     }
 }
 
@@ -139,8 +244,7 @@ extension View {
 /// open, and its X asks before closing it.
 ///
 /// Inside a `PopupGroupCard` it's drawn as a tile instead: no X or shadow of
-/// its own, since the group's card has them. `tint` colours only its symbol;
-/// the card itself stays neutral.
+/// its own, since the group's card has them.
 struct PopupCard<Content: View>: View {
     var title: String
     var systemImage: String
@@ -158,7 +262,7 @@ struct PopupCard<Content: View>: View {
     private var isTile: Bool { group != nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: isTile ? 12 : 16) {
             // A tile titled like its group leaves the title to the group.
             if title != group?.title {
                 header
@@ -168,9 +272,13 @@ struct PopupCard<Content: View>: View {
         }
         .padding(isTile ? 16 : 20)
         .frame(maxWidth: 460)
-        .background(shape.fill(isTile ? Color.clear : Theme.raised))
-        .overlay(shape.strokeBorder(Theme.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(isTile ? 0 : 0.5), radius: 24, x: 0, y: 12)
+        .background(
+            shape
+                .fill(Color(.secondarySystemBackground).opacity(isTile ? 0 : 1))
+                .overlay(shape.fill(tint.opacity(0.1)))
+        )
+        .overlay(shape.strokeBorder(tint.opacity(isTile ? 0.25 : 0.35), lineWidth: 1))
+        .shadow(color: .black.opacity(isTile ? 0 : 0.45), radius: 30, x: 0, y: 14)
         .accessibilityElement(children: .contain)
         .accessibilityAction(.escape, requestClose)
         .alert(L("Closing this popup will end the process. Are you sure?"),
@@ -186,40 +294,40 @@ struct PopupCard<Content: View>: View {
         if let group {
             group.close()
         } else if endsProcess {
-            SoundEffects.play(.tap)
             confirmingClose = true
         } else {
-            SoundEffects.play(.dismiss)
             onClose()
         }
     }
 
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: isTile ? 16 : Theme.popupRadius, style: .continuous)
+        RoundedRectangle(cornerRadius: isTile ? 20 : 28, style: .continuous)
     }
 
     private var header: some View {
         HStack(spacing: 12) {
             Image(systemName: systemImage)
-                .font(.title3)
+                .font((isTile ? Font.body : .title3).weight(.semibold))
                 .foregroundStyle(tint)
-                .frame(width: 28, height: 28)
+                .frame(width: isTile ? 34 : 40, height: isTile ? 34 : 40)
+                .background(Circle().fill(tint.opacity(0.16)))
             Text(title)
                 .font(.headline)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if !isTile {
                 PopupCloseButton(action: requestClose)
-                    .transition(.opacity)
+                    .transition(.opacity.combined(with: .scale(scale: 0.6)))
             }
         }
     }
 }
 
 /// Popups that always come up together, as one card under a title of their
-/// own: each sits inside as a tile, and the card's X closes them all. With
-/// only one of them up the card steps back and that one shows as a popup of
-/// its own; the card stays in place, so the others join it without a jump.
+/// own: each sits inside as a tile in its own tint, and the card's X closes
+/// them all. With only one of them up the card steps back and that one shows
+/// as a popup of its own; the card stays in place, so the others join it
+/// without a jump.
 struct PopupGroupCard<Content: View>: View {
     var title: String
     var systemImage: String
@@ -235,7 +343,7 @@ struct PopupGroupCard<Content: View>: View {
     @State private var confirmingClose = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             if isGrouped {
                 header
                     .padding(.bottom, 4)
@@ -246,9 +354,14 @@ struct PopupGroupCard<Content: View>: View {
         .environment(\.popupGroup, isGrouped ? PopupGroup(title: title, close: requestClose) : nil)
         .padding(isGrouped ? 20 : 0)
         .frame(maxWidth: 460)
-        .background(shape.fill(Theme.raised).opacity(isGrouped ? 1 : 0))
-        .overlay(shape.strokeBorder(Theme.hairline.opacity(isGrouped ? 1 : 0), lineWidth: 1))
-        .shadow(color: .black.opacity(isGrouped ? 0.5 : 0), radius: 24, x: 0, y: 12)
+        .background(
+            shape
+                .fill(Color(.secondarySystemBackground))
+                .overlay(shape.fill(tint.opacity(0.08)))
+                .opacity(isGrouped ? 1 : 0)
+        )
+        .overlay(shape.strokeBorder(tint.opacity(isGrouped ? 0.35 : 0), lineWidth: 1))
+        .shadow(color: .black.opacity(isGrouped ? 0.45 : 0), radius: 30, x: 0, y: 14)
         .accessibilityElement(children: .contain)
         .accessibilityAction(.escape, requestClose)
         .alert(L("Closing this popup will end the process. Are you sure?"),
@@ -261,26 +374,25 @@ struct PopupGroupCard<Content: View>: View {
     /// Closes the group, asking first when that would end the run.
     private func requestClose() {
         if endsProcess {
-            SoundEffects.play(.tap)
             confirmingClose = true
         } else {
-            SoundEffects.play(.dismiss)
             onClose()
         }
     }
 
     private var shape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: Theme.popupRadius, style: .continuous)
+        RoundedRectangle(cornerRadius: 30, style: .continuous)
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             Image(systemName: systemImage)
-                .font(.title3)
+                .font(.title2.weight(.semibold))
                 .foregroundStyle(tint)
-                .frame(width: 28, height: 28)
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(tint.opacity(0.16)))
             Text(title)
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.bold))
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             PopupCloseButton(action: requestClose)
@@ -295,13 +407,11 @@ private struct PopupCloseButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "xmark")
-                .font(.footnote.weight(.semibold))
+                .font(.footnote.weight(.bold))
                 .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Theme.control))
-                .contentShape(Circle())
+                .padding(8)
+                .background(Circle().fill(.white.opacity(0.08)))
         }
-        // The card plays the sound, which depends on whether it asks first.
         .buttonStyle(.plain)
         .accessibilityLabel(L("Close"))
     }
@@ -366,7 +476,7 @@ private struct PopupStack<Item: Identifiable & Equatable, Card: View>: ViewModif
                             .transition(.popup)
                     }
                 }
-                .animation(.smooth(duration: 0.3), value: isPresented)
+                .animation(.smooth(duration: 0.35), value: isPresented)
             }
     }
 
@@ -374,7 +484,7 @@ private struct PopupStack<Item: Identifiable & Equatable, Card: View>: ViewModif
     private var cards: some View {
         GeometryReader { proxy in
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 14) {
                     ForEach(items) { item in
                         card(item)
                             .transition(.popup)
@@ -388,7 +498,7 @@ private struct PopupStack<Item: Identifiable & Equatable, Card: View>: ViewModif
                         .contentShape(Rectangle())
                         .onTapGesture { onBackdropTap?() }
                 }
-                .animation(.smooth(duration: 0.35), value: items)
+                .animation(.smooth(duration: 0.4, extraBounce: 0.08), value: items)
             }
             .scrollBounceBehavior(.basedOnSize)
         }
@@ -435,8 +545,8 @@ struct MessagePopup: View {
 
     var body: some View {
         PopupCard(title: title,
-                  systemImage: isError ? "exclamationmark.triangle" : "checkmark.seal",
-                  tint: isError ? Theme.negative : Theme.positive,
+                  systemImage: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill",
+                  tint: isError ? .red : .green,
                   onClose: onClose) {
             ErrorMessage(message: message, offersLogs: isError)
         }
@@ -451,7 +561,7 @@ struct ErrorMessage: View {
     var offersLogs = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             Text(message)
                 .font(.subheadline)
                 .fixedSize(horizontal: false, vertical: true)
@@ -486,11 +596,12 @@ enum ErrorHelp {
 /// Copies the activity log, the same text as Settings › Activity Log › Copy,
 /// and says so for a moment.
 struct CopyLogsButton: View {
+    var tint: Color = .red
     @State private var copied = false
 
     var body: some View {
         Button {
-            UIPasteboard.general.string = LogStore.shared.text
+            UIPasteboard.general.string = Engine.shared.logText()
             copied = true
             Task {
                 try? await Task.sleep(for: .seconds(2))
@@ -499,26 +610,28 @@ struct CopyLogsButton: View {
         } label: {
             Label(copied ? L("Copied") : L("Copy logs"),
                   systemImage: copied ? "checkmark" : "doc.on.doc")
+                .font(.subheadline.weight(.semibold))
                 .contentTransition(.symbolEffect(.replace))
         }
-        .buttonStyle(SecondaryButtonStyle(), sound: .rise)
-        .animation(.smooth(duration: 0.2), value: copied)
+        .buttonStyle(.bordered)
+        .tint(tint)
+        .animation(.default, value: copied)
     }
 }
 
-/// Numbered instructions, as the guides and pairing popups list them: the
-/// numbers set in figures, on the first line of each step.
+/// Numbered instructions, as the guides and pairing popups list them.
 struct NumberedSteps: View {
     var steps: [String]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(steps.enumerated()), id: \.offset) { idx, step in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
                     Text("\(idx + 1)")
-                        .font(.subheadline.monospacedDigit().weight(.medium))
-                        .foregroundStyle(Theme.accent)
-                        .frame(width: 16, alignment: .leading)
+                        .font(.caption.weight(.bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Theme.brand))
                     Text(step)
                         .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
@@ -528,42 +641,20 @@ struct NumberedSteps: View {
     }
 }
 
-/// The code an iPhone asks for while it pairs: one figure to a key, big
-/// enough to read across a room and type in without losing your place.
-struct PairingCodeDigits: View {
-    var pin: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(Array(pin.enumerated()), id: \.offset) { _, digit in
-                Text(String(digit))
-                    .font(.system(size: 32, weight: .medium, design: .monospaced))
-                    .frame(maxWidth: 44, minHeight: 56)
-                    .background(key.fill(Theme.control))
-                    .overlay(key.strokeBorder(Theme.hairline, lineWidth: 1))
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(pin.map(String.init).joined(separator: " "))
-    }
-
-    private var key: RoundedRectangle {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-    }
-}
-
-/// The code an iPhone asks for while it pairs, as a popup of its own, with
-/// where it goes.
+/// The code an iPhone asks for while it pairs, as a popup of its own: big
+/// enough to read at a glance, with where it goes.
 struct PairingCodePopup: View {
     var pin: String
     var caption: String
     var onClose: () -> Void
 
     var body: some View {
-        PopupCard(title: L("Pairing code"), systemImage: "lock.iphone", tint: Theme.warning,
+        PopupCard(title: L("Pairing code"), systemImage: "lock.iphone", tint: .orange,
                   onClose: onClose) {
-            VStack(spacing: 12) {
-                PairingCodeDigits(pin: pin)
+            VStack(spacing: 10) {
+                Text(pin)
+                    .font(.system(size: 46, weight: .bold, design: .rounded))
+                    .tracking(8)
                 Text(caption)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -577,33 +668,14 @@ struct PairingCodePopup: View {
 
 // MARK: - Small components
 
-/// A card's label: what the card is for, quieter than what it holds, after
-/// an icon in the light blue.
-struct SectionTitle: View {
-    var title: String
-    var systemImage: String
-
-    var body: some View {
-        Label {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-        } icon: {
-            Image(systemName: systemImage)
-                .font(.subheadline)
-                .foregroundStyle(Theme.accent)
-        }
-    }
-}
-
-/// How something stands, in a few words after a small dot: the app's mark
-/// for the tunnel, the device, the team and a run. Green is working, amber
-/// and red need the user, and a muted dot is a state that needs nothing.
-struct StatusDot: View {
+/// A compact, colour-coded status capsule shown under the header.
+struct StatusPill: View {
     var text: String
+    var systemImage: String
     var color: Color
-    /// A state that needs nothing from the user, shown with a muted dot.
-    var idle = false
+    /// Wears a translucent glass capsule instead of the tinted fill, for an
+    /// idle state that shouldn't read as a status chip.
+    var glass: Bool = false
 
     var body: some View {
         let label = Label(text, systemImage: systemImage)
@@ -619,35 +691,23 @@ struct StatusDot: View {
         } else {
             label.background(Capsule().fill(color.opacity(0.16)))
         }
-        .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
     }
 }
 
-/// "Beta" tag for unfinished features, sized to sit next to a title.
+/// "BETA" tag for unfinished features, sized to sit next to a title.
 struct BetaBadge: View {
     var body: some View {
-        Text(L("Beta"))
-            .font(.caption)
-            .foregroundStyle(Theme.accent)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1))
+        Text(L("Beta").uppercased())
+            .font(.caption2.weight(.heavy))
+            .foregroundStyle(Theme.accent2)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Theme.accent2.opacity(0.16)))
             .fixedSize()
     }
 }
 
-extension Image {
-    /// A logo tile's art, filling its frame: SideInstaller's own are the
-    /// `navy` patterns and a white glyph on a night-blue tile.
-    func logoArt() -> some View {
-        resizable()
-            .scaledToFill()
-    }
-}
-
-/// The top of each screen: the page's logo tile, the title, and an accessory.
+/// The hero at the top of each screen: a glyph, the title, and an accessory.
 ///
 /// In a short window (an iPhone on its side, or a closed iPhone Duo stood up
 /// like a tent) it takes one row, the glyph beside the title, so it doesn't
@@ -742,16 +802,17 @@ struct BrandHeader<Accessory: View>: View {
         return layout {
             glyph
                 .frame(width: glyphSide, height: glyphSide)
-            VStack(alignment: alignment, spacing: 8) {
+                .shadow(color: Theme.glow, radius: isRow ? 14 : 20, x: 0, y: isRow ? 8 : 12)
+            VStack(alignment: alignment, spacing: isRow ? 8 : 14) {
                 VStack(alignment: alignment, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(title)
-                            .font((isRow ? Font.title : .largeTitle).weight(.semibold))
+                            .font((isRow ? Font.title : .largeTitle).weight(.bold))
                         if beta { BetaBadge() }
                     }
                     if let subtitle {
                         Text(subtitle)
-                            .font(.subheadline)
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -765,25 +826,26 @@ struct BrandHeader<Accessory: View>: View {
     /// The icon art's corner radius, at any size.
     private var cornerRadius: CGFloat { glyphSide * 23 / 86 }
 
-    private var tile: RoundedRectangle {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-    }
-
     @ViewBuilder
     private var glyph: some View {
         if let image {
             Image(image)
-                .logoArt()
-                .clipShape(tile)
-                // The art's dark tile would melt into the page without it.
-                .overlay(tile.strokeBorder(Theme.hairline, lineWidth: 1))
+                .resizable()
+                .scaledToFill()
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                // A breathe while a run is in flight, mirroring `.pulse`.
+                .scaleEffect(animateIcon ? 1.04 : 1)
+                .animation(animateIcon ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+                                       : .default,
+                           value: animateIcon)
         } else {
             ZStack {
-                tile.fill(Theme.navy)
-                tile.strokeBorder(Theme.hairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Theme.brand)
                 Image(systemName: icon)
-                    .font(.system(size: glyphSide * 32 / 72))
+                    .font(.system(size: glyphSide * 40 / 86, weight: .semibold))
                     .foregroundStyle(.white)
+                    .symbolEffect(.pulse, isActive: animateIcon)
             }
         }
     }
@@ -791,16 +853,16 @@ struct BrandHeader<Accessory: View>: View {
 
 // MARK: - Field styling
 
-/// A control's inset fill and hairline, for a `.plain` text field or a field
-/// that opens a menu.
+/// Inset, filled text-field background, softer than `.roundedBorder`.
 private struct FieldBackground: ViewModifier {
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
         content
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(shape.fill(Theme.control))
-            .overlay(shape.strokeBorder(Theme.hairline, lineWidth: 1))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 13)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.white.opacity(0.07))
+            )
     }
 }
 
@@ -811,30 +873,12 @@ extension View {
 
 // MARK: - Buttons
 
-/// The full-width call to action: filled `blue` under a white label, the one
-/// solid colour on a page. Plays `sound` as it fires.
-struct PrimaryButtonStyle: PrimitiveButtonStyle {
-    var sound: UISound = .press
+/// The full-width gradient call-to-action; pass a `gradient` to recolour it.
+struct PrimaryButtonStyle: ButtonStyle {
+    var gradient: LinearGradient = Theme.brand
+    var glow: Color = Theme.accent
 
     func makeBody(configuration: Configuration) -> some View {
-        SoundingButtonStyle(base: PrimaryButtonLook(), sound: sound)
-            .makeBody(configuration: configuration)
-    }
-}
-
-/// How `PrimaryButtonStyle` draws its button.
-private struct PrimaryButtonLook: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        PrimaryButtonBody(configuration: configuration)
-    }
-}
-
-private struct PrimaryButtonBody: View {
-    let configuration: ButtonStyleConfiguration
-    @Environment(\.isEnabled) private var isEnabled
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
         configuration.label
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
@@ -878,37 +922,41 @@ struct SecondaryButtonStyle: ButtonStyle {
 // MARK: - Transitions
 
 extension AnyTransition {
-    /// The insert and remove every status card uses: a short fade and rise.
+    /// The insert and remove every status card uses: a fading scale.
     static var cardAppear: AnyTransition {
-        .asymmetric(insertion: .opacity.combined(with: .offset(y: -8)),
-                    removal: .opacity)
+        .asymmetric(
+            insertion: .opacity
+                .combined(with: .scale(scale: 0.96, anchor: .top))
+                .combined(with: .offset(y: -10)),
+            removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
+        )
     }
 
-    /// A popup fading into place, and away when it closes.
+    /// A popup card rising into place, and sinking away when it closes.
     static var popup: AnyTransition {
-        .opacity.combined(with: .scale(scale: 0.96))
+        .opacity.combined(with: .scale(scale: 0.92))
     }
 }
 
 // MARK: - Page entrance
 
-/// One object's part in a page's entrance: a short fade and rise, staggered by
-/// `index` so the first few settle one after another. Driven by `onAppear`, so
-/// it replays on every page switch, and rows added later animate without
-/// disturbing the ones shown.
+/// One object's part in a page's entrance cascade, staggered by `index` so they
+/// settle one after another. Driven by `onAppear`, so it replays on every page
+/// switch, and rows added later animate without disturbing the ones shown.
 private struct CascadeItem: ViewModifier {
     let index: Int
     @State private var shown = false
 
-    /// 50 ms apart, and nothing past the sixth waits longer than the sixth.
-    private var delay: Double { Double(min(index, 5)) * 0.05 }
+    /// 55 ms apart: enough to read as a cascade, quick enough not to drag.
+    private var delay: Double { Double(index) * 0.055 }
 
     func body(content: Content) -> some View {
         content
             .opacity(shown ? 1 : 0)
-            .offset(y: shown ? 0 : 8)
+            .scaleEffect(shown ? 1 : 0.98, anchor: .top)
+            .offset(y: shown ? 0 : 16)
             .onAppear {
-                withAnimation(.smooth(duration: 0.4).delay(delay)) {
+                withAnimation(.smooth(duration: 0.4, extraBounce: 0.1).delay(delay)) {
                     shown = true
                 }
             }

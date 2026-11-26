@@ -23,10 +23,8 @@ struct PairingTargetApp: Identifiable, Equatable {
     }
 
     /// True for an app that is handed the RPPairing record alone and nothing
-    /// else; see `MadeiraPairingHandoff` and `ARMSX3PairingHandoff`.
-    var takesRemoteRecordOnly: Bool {
-        name == MadeiraPairingHandoff.appName || name == ARMSX3PairingHandoff.appName
-    }
+    /// else; see `MadeiraPairingHandoff`.
+    var takesRemoteRecordOnly: Bool { name == MadeiraPairingHandoff.appName }
 
     /// The supported apps, in display order. `StikDebug (Sideloaded)` is
     /// reached only through the bundle-id check in `PairingTargets.match`.
@@ -72,9 +70,6 @@ struct PairingTargetApp: Identifiable, Equatable {
               bundleIDContains: nil),
         .init(name: MadeiraPairingHandoff.appName,
               remoteRelativePath: MadeiraPairingHandoff.remoteRelativePath,
-              bundleIDContains: nil),
-        .init(name: ARMSX3PairingHandoff.appName,
-              remoteRelativePath: ARMSX3PairingHandoff.remoteRelativePath,
               bundleIDContains: nil),
     ]
 }
@@ -339,81 +334,12 @@ enum MadeiraPairingHandoff {
     }
 }
 
-/// The pairing hand-off ARMSX3 reads.
-///
-/// ARMSX3's JIT keeps this iPhone's RPPairing file in its Library, at
-/// `Application Support/StikJIT/pairingFile.plist`, which house_arrest can't
-/// reach. Every time it opens, before `main()`, it moves in a
-/// `pairingFile.plist` it finds at the top of its Documents, replacing the one
-/// it had, and deletes that copy (`Armsx3TakeDocumentsDrop` in ARMSX3's
-/// `ios/jit-enabler/StikJITExtensionLauncher.m`). That is the folder ARMSX3
-/// tells its users to drop the file in from Files, and house_arrest reaches it.
-///
-/// ARMSX3 takes the file only if it is an RPPairing record (its JIT reaches
-/// lockdownd through the RSD tunnel, never with a lockdown record), and leaves
-/// anything else lying in Documents. So, as for Madeira, a pairing file without
-/// one isn't written at all, and one that also holds a lockdown record is cut
-/// down to the RPPairing keys.
-enum ARMSX3PairingHandoff {
-
-    /// ARMSX3's home-screen name, as installation_proxy reports it.
-    static let appName = "ARMSX3"
-    /// Where the record goes, relative to ARMSX3's Documents.
-    static let remoteRelativePath = "pairingFile.plist"
-
-    /// The RPPairing record in `pairingFile` on its own, or nil if it holds
-    /// none that ARMSX3 would accept.
-    static func record(from pairingFile: Data) -> Data? {
-        // The same test ARMSX3 runs (`armsx3_pairing_shape_of`): both keys 32
-        // bytes, and an identifier.
-        guard PairingFileKind.of(data: pairingFile).hasRemotePairing else { return nil }
-        return (try? SideStorePairingHandoff.split(pairingFile, udid: nil))?.remote
-    }
-}
-
 /// What an install put into Madeira.
 struct MadeiraHandoff: Equatable {
     /// The pairing file, for its built-in JIT.
     var pairing = false
     /// The sign-in it renews its own signing with.
     var signIn = false
-}
-
-/// The pairing hand-off AltStore Classic reads from 2.3.1 on: the RPPairing
-/// record on its own, as an XML plist, at `Documents/ALTPairingFile.plist`,
-/// where AltServer writes it after installing AltStore (altstoreio/AltStore
-/// 5811912, 23 September 2026). AltStore takes it into its Keychain as its
-/// Remote AltServer is set up, which then skips pairing.
-///
-/// Only an RPPairing record connects: AltStore's `OnDeviceClient` refuses one
-/// without `private_key`. A lockdown record would be taken all the same and
-/// then fail, so none is written without an RPPairing one, and AltStore pairs
-/// during that setup instead. AltStore 2.3 read the record from its own bundle,
-/// sealed with the signing certificate's machine ID (`ALTPairingFile.dat`),
-/// which signing still adds for it (vendored isideload, change 9).
-enum AltStorePairingHandoff {
-
-    /// AltStore's home-screen name, as installation_proxy reports it.
-    static let appName = "AltStore"
-    /// AltStore Classic's bundle ID as published, before signing appends the
-    /// team ID. Signing sets up only this one as AltStore, not the beta's
-    /// ("com.rileytestut.AltStore.Beta").
-    static let bundleID = "com.rileytestut.AltStore"
-    /// Where the record goes, relative to AltStore's Documents.
-    static let remoteRelativePath = "ALTPairingFile.plist"
-
-    /// True for AltStore Classic's bundle ID, as published or with the team ID
-    /// an earlier signing appended; false for the beta's.
-    static func isAltStore(bundleID id: String) -> Bool {
-        id == bundleID || (id.hasPrefix(bundleID + ".") && !id.hasPrefix(bundleID + ".Beta"))
-    }
-
-    /// The RPPairing record in `pairingFile` on its own, as idevice writes it
-    /// for AltServer, or nil if it holds none AltStore could connect with.
-    static func record(from pairingFile: Data) -> Data? {
-        guard PairingFileKind.of(data: pairingFile).hasRemotePairing else { return nil }
-        return (try? SideStorePairingHandoff.split(pairingFile, udid: nil))?.remote
-    }
 }
 
 /// The sign-in Madeira renews its own signing with.
@@ -536,7 +462,7 @@ enum SideStorePairingHandoff {
     ]
     private static let requiredRemoteKeys = ["private_key", "public_key", "identifier"]
     /// Every RPPairing key, including the optional `alt_irk`.
-    static let remoteKeys: Set<String> = ["private_key", "public_key", "identifier", "alt_irk"]
+    private static let remoteKeys: Set<String> = ["private_key", "public_key", "identifier", "alt_irk"]
 
     /// The records split out of the pairing file, each an XML plist (SideStore
     /// reads the file as a UTF-8 string).
@@ -597,189 +523,6 @@ enum SideStorePairingHandoff {
     }
 }
 
-/// The pairing file LiveContainer's built-in SideStore keeps, which “Get it
-/// from SideStore” imports while SideInstaller runs inside LiveContainer.
-///
-/// Asking SideStore can't work there. iOS opens only the URL schemes in
-/// LiveContainer's Info.plist, which has no `sideinstaller`, so the link
-/// SideStore sends back goes nowhere. LiveContainer's own links don't help
-/// either: while a guest app runs it drops every `livecontainer://` link it
-/// doesn't handle itself, and its `open-url` forwarding wants the whole link
-/// base64-encoded, which SideStore's reply can't produce.
-///
-/// SideInstaller runs in LiveContainer's own process, though, and the built-in
-/// SideStore's home is the `SideStore` folder in LiveContainer's Documents
-/// (`SideStoreHome.liveContainer`), so its files are read where they lie. The
-/// SideStore that LiveContainer carries keeps one file per protocol, as
-/// SideStore's nightlies do (`SideStorePairingHandoff`); its builds before
-/// those kept one legacy file. The records found go into one file, as in
-/// SideInstaller's own pairing file.
-enum LiveContainerSideStorePairing {
-
-    /// What looking for the built-in SideStore's pairing file came to.
-    enum Outcome {
-        /// A pairing file to import, and the files it was made from.
-        case found(LinkedPairingFile, from: [String])
-        /// SideInstaller runs in a LiveContainer Multitask Mode window: an app
-        /// extension, which isn't let into LiveContainer's Documents.
-        case unreachable
-        /// No pairing file to be had.
-        case notFound
-    }
-
-    /// The file SideStore read before it kept one per protocol. It can hold
-    /// either record, or both.
-    static let legacyFileName = "ALTPairingFile.mobiledevicepairing"
-
-    /// A pairing file is a few KB; anything far bigger isn't one.
-    private static let maxBytes = 1 << 20
-
-    /// `+[NSUserDefaults sideStoreExist]`, which LiveContainer adds for its
-    /// guest apps: whether it carries a built-in SideStore. Nil when it can't
-    /// be asked (outside LiveContainer, or an older one).
-    static var hasBuiltInSideStore: Bool? { liveContainerFlag("sideStoreExist") }
-
-    /// Reads the built-in SideStore's pairing files. `log` gets a line for
-    /// each one that is there but can't be used, and for why none was found.
-    static func find(log: (String) -> Void) -> Outcome {
-        guard let folder = documentsFolder else {
-            log("Pairing import: LiveContainer's home folder isn't known.")
-            return .notFound
-        }
-        guard hasBuiltInSideStore != false else {
-            log("Pairing import: this LiveContainer has no built-in SideStore.")
-            return .notFound
-        }
-
-        // Each protocol's own file, then the legacy one.
-        var files: [(name: String, data: Data, kind: PairingFileKind)] = []
-        var denied = false
-        for name in [SideStorePairingHandoff.remoteFileName,
-                     SideStorePairingHandoff.lockdownFileName, legacyFileName] {
-            switch read(folder.appendingPathComponent(name)) {
-            case .missing:
-                continue
-            case .denied:
-                denied = true
-            case .unusable(let reason):
-                log("Pairing import: the built-in SideStore's \(name) \(reason).")
-            case .file(let data):
-                let kind = PairingFileKind.of(data: data)
-                guard kind.isUsable else {
-                    log("Pairing import: the built-in SideStore's \(name) isn't a pairing file.")
-                    continue
-                }
-                files.append((name, data, kind))
-            }
-        }
-
-        // Each record from its own protocol's file when that has it: SideStore
-        // keeps a file it imported whole, so one can carry both records.
-        let remote = files.first { $0.kind.hasRemotePairing }
-        let lockdown = files.first { $0.name == SideStorePairingHandoff.lockdownFileName && $0.kind.hasLockdown }
-            ?? files.first { $0.kind.hasLockdown }
-        switch (remote, lockdown) {
-        case (nil, nil):
-            guard !denied else {
-                log("Pairing import: the built-in SideStore's files can't be opened from here\(runsInMultitaskWindow ? " (a Multitask Mode window)" : "").")
-                return runsInMultitaskWindow ? .unreachable : .notFound
-            }
-            log("Pairing import: the built-in SideStore has no pairing file.")
-            return .notFound
-        case let (one?, nil), let (nil, one?):
-            return found(one.data, kind: one.kind, from: [one.name])
-        case let (remote?, lockdown?) where remote.name == lockdown.name:
-            return found(remote.data, kind: remote.kind, from: [remote.name])
-        case let (remote?, lockdown?):
-            do {
-                let merged = try merge(lockdown: lockdown.data, remote: remote.data)
-                return found(merged, kind: PairingFileKind.of(data: merged),
-                             from: [lockdown.name, remote.name])
-            } catch {
-                // Then the one record this iOS connects with best.
-                let one = Engine.lockdownWorksOverLoopback ? lockdown : remote
-                log("Pairing import: couldn't merge \(lockdown.name) with \(remote.name) (\(error.localizedDescription)), so only \(one.name) is used.")
-                return found(one.data, kind: one.kind, from: [one.name])
-            }
-        }
-    }
-
-    private static func found(_ data: Data, kind: PairingFileKind, from names: [String]) -> Outcome {
-        .found(LinkedPairingFile(data: data, kind: kind, fromSideStore: true), from: names)
-    }
-
-    /// `lockdown`'s lockdown record and `remote`'s RPPairing record in one
-    /// plist, as `CompositePairingFile` merges SideInstaller's own. Each file's
-    /// other record is left out, so nothing comes from another pairing.
-    private static func merge(lockdown: Data, remote: Data) throws -> Data {
-        let remoteKeys = SideStorePairingHandoff.remoteKeys
-        var merged = try dictionary(lockdown).filter { !remoteKeys.contains($0.key) }
-        for (key, value) in try dictionary(remote) where remoteKeys.contains(key) {
-            merged[key] = value
-        }
-        return try PropertyListSerialization.data(fromPropertyList: merged, format: .xml, options: 0)
-    }
-
-    private static func dictionary(_ data: Data) throws -> [String: Any] {
-        let parsed = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
-        guard let dict = parsed as? [String: Any] else {
-            throw CompositePairingFile.BuildError.notAPlistDictionary("pairing")
-        }
-        return dict
-    }
-
-    // MARK: Reading
-
-    /// The built-in SideStore's Documents. LiveContainer gives it the
-    /// `SideStore` folder in its own Documents as its home; `LC_HOME_PATH` is
-    /// LiveContainer's home, kept when it moves the guest app's.
-    private static var documentsFolder: URL? {
-        guard let home = getenv("LC_HOME_PATH").map({ String(cString: $0) }), !home.isEmpty
-        else { return nil }
-        return URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent("Documents/" + SideStoreHome.liveContainer.documentsPrefix,
-                                    isDirectory: true)
-    }
-
-    private enum Read {
-        case file(Data)
-        case missing
-        /// The sandbox keeps SideInstaller out.
-        case denied
-        /// There, but not to be read as a pairing file: why, for the log.
-        case unusable(String)
-    }
-
-    private static func read(_ url: URL) -> Read {
-        do {
-            let size = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-            guard size > 0 else { return .unusable("is empty") }
-            guard size <= maxBytes else { return .unusable("is too big to be a pairing file (\(size) bytes)") }
-            return .file(try Data(contentsOf: url))
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
-            return .missing
-        } catch let error as CocoaError where error.code == .fileReadNoPermission {
-            return .denied
-        } catch {
-            return .unusable("can't be read (\(error.localizedDescription))")
-        }
-    }
-
-    /// `+[NSUserDefaults isLiveProcess]`: true in a Multitask Mode window,
-    /// which LiveContainer runs as an app extension with a sandbox of its own.
-    private static var runsInMultitaskWindow: Bool { liveContainerFlag("isLiveProcess") == true }
-
-    /// One of the C `bool` class methods LiveContainer adds to NSUserDefaults
-    /// for its guest apps, or nil when it has no such method.
-    private static func liveContainerFlag(_ name: String) -> Bool? {
-        let selector = NSSelectorFromString(name)
-        guard let method = class_getClassMethod(UserDefaults.self, selector) else { return nil }
-        typealias Getter = @convention(c) (AnyClass, Selector) -> Bool
-        let get = unsafeBitCast(method_getImplementation(method), to: Getter.self)
-        return get(UserDefaults.self, selector)
-    }
-}
-
 /// The anisette settings SideStore signs in with, set when SideInstaller
 /// installs it.
 ///
@@ -797,24 +540,17 @@ enum SideStoreAnisetteHandoff {
     /// as the list has it: SideStore starts on the first server when the one
     /// picked isn't on it.
     static let server = "https://new.ani.sidestore.io"
-    /// The Mac SideInstaller reports through the macOS-ADI servers (isideload's
-    /// `CURRENT_MAC_CLIENT_INFO`): SideStore's default (AnisetteKit's
-    /// `defaultClientInfo`, `<MacBookPro18,3> <macOS;26.6;25F84>`) with its
-    /// system spelled `Mac OS X`. Since 2026-11-20 Apple's edge answers a
-    /// client that says `macOS` with HTTP 503, so SideStore's default no
-    /// longer signs in (SideStore #1745), and its users get past that by
-    /// changing the spelling. The user agent is AnisetteKit's
-    /// `defaultUserAgent`.
-    static let clientInfo = "<MacBookPro18,3> <Mac OS X;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+    /// SideStore's default headers (AnisetteKit's `defaultClientInfo` and
+    /// `defaultUserAgent`): a current Mac, which SideInstaller reports through
+    /// the macOS-ADI servers too.
+    static let clientInfo = "<MacBookPro18,3> <macOS;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
     static let userAgent = "AuthKit/1 (Macintosh; OS X 26.6) (com.apple.akd/1.0)"
 
     /// Sets SideStore's settings (`prefs`, its preferences plist) to sign in
-    /// that way, and returns what changed, for the log. A macOS-ADI server or
-    /// lillq (which tells SideStore's users how to add it) already picked is
-    /// kept, and so is client info saved for a Mac that `keepsClientInfo`.
-    /// Anything else (none saved, so SideStore's default; a Windows PC or an
-    /// Android phone, as guides for -80045 had people save; a Mac spelled
-    /// `macOS`, or older than macOS 10.13) becomes `clientInfo`.
+    /// that way, and returns what changed, for the log. A macOS-ADI server
+    /// already picked is kept, and so is client info saved for a Mac; client
+    /// info saved for a Windows PC or an Android phone (as guides for -80045
+    /// had people do) goes back to SideStore's default Mac.
     static func applySettings(to prefs: inout [String: Any]) -> [String] {
         var changes: [String] = []
         if prefs["useOnDeviceAnisette"] as? Bool != false {
@@ -827,29 +563,16 @@ enum SideStoreAnisetteHandoff {
         }
         let picked = (prefs["menuAnisetteURL"] as? String) ?? ""
         let pickedHost = URL(string: picked)?.host?.lowercased() ?? ""
-        if !AnisetteServer.macADIHosts.contains(pickedHost),
-           !AnisetteServer.poolHosts.contains(pickedHost) {
+        if !AnisetteServer.macADIHosts.contains(pickedHost) {
             prefs["menuAnisetteURL"] = server
             changes.append("server “SideStore (New)”")
         }
-        if !keepsClientInfo(prefs["customAnisetteClientInfo"] as? String ?? "") {
+        if let saved = prefs["customAnisetteClientInfo"] as? String, !saved.isEmpty,
+           !saved.contains("<macOS;"), !saved.contains("<Mac OS X;") {
             prefs["customAnisetteClientInfo"] = clientInfo
             prefs["customAnisetteUserAgent"] = userAgent
-            changes.append("client info macOS 26.6, spelled “Mac OS X”")
+            changes.append("client info back to SideStore's default Mac")
         }
         return changes
-    }
-
-    /// Whether client info SideStore has saved signs in as it is: a Mac
-    /// spelled `Mac OS X`, which Apple's edge lets through, on macOS 10.13 or
-    /// later. Older Macs, as the servers name, get -23782 for some accounts and
-    /// a text message Apple then won't send for others (iLoader #1205).
-    static func keepsClientInfo(_ saved: String) -> Bool {
-        guard let marker = saved.range(of: "<Mac OS X;") else { return false }
-        let version = saved[marker.upperBound...].prefix { $0 != ";" && $0 != ">" }
-        let parts = version.split(separator: ".").map { Int($0.trimmingCharacters(in: .whitespaces)) }
-        guard let major = parts.first ?? nil else { return false }
-        let minor = parts.count > 1 ? (parts[1] ?? 0) : 0
-        return (major, minor) >= (10, 13)
     }
 }

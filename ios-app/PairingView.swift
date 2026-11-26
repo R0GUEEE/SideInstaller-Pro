@@ -5,7 +5,7 @@ import UIKit
 /// supported app installed on this iPhone over the loopback tunnel. Pushed from
 /// Tools, whose `NavigationStack` this relies on.
 struct PairingView: View {
-    @Environment(Engine.self) private var engine
+    @EnvironmentObject private var engine: Engine
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: PairingManager
@@ -13,7 +13,7 @@ struct PairingView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 18) {
                 header.cascadeItem(0)
                 pairingFileCard.cascadeItem(1)
                 installCard.cascadeItem(2)
@@ -45,9 +45,9 @@ struct PairingView: View {
     // MARK: Header
 
     private var header: some View {
-        BrandHeader(icon: "lock.doc", image: "PairingLogo", title: L("Pairing")) {
+        BrandHeader(icon: "lock.doc.fill", image: "PairingLogo", title: L("Pairing")) {
             statusPill
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .top)))
                 .id(statusID)
         }
     }
@@ -60,11 +60,11 @@ struct PairingView: View {
     @ViewBuilder
     private var statusPill: some View {
         if let summary = engine.deviceSummary {
-            StatusDot(text: summary, color: Theme.positive)
+            StatusPill(text: summary, systemImage: "iphone", color: .green)
         } else if manager.pairingFileExists {
-            StatusDot(text: L("Pairing file ready"), color: Theme.positive)
+            StatusPill(text: L("Pairing file ready"), systemImage: "checkmark.seal.fill", color: .green)
         } else {
-            StatusDot(text: L("No pairing file"), color: Theme.warning, idle: true)
+            StatusPill(text: L("No pairing file"), systemImage: "lock.slash.fill", color: .orange, glass: true)
         }
     }
 
@@ -72,15 +72,15 @@ struct PairingView: View {
 
     private var pairingFileCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                sectionTitle(L("Pairing file"), systemImage: "lock.doc")
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle(L("Pairing file"), systemImage: "lock.doc.fill")
 
                 // This page is only reachable on iOS 27+; the Tools row is hidden
                 // on older iOS.
                 Button { manager.generate() } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         if manager.isGenerating {
-                            ProgressView()
+                            ProgressView().tint(.white)
                             Text(L("Pairing…"))
                         } else {
                             Image(systemName: manager.pairingFileExists ? "arrow.clockwise" : "lock.iphone")
@@ -95,11 +95,12 @@ struct PairingView: View {
                 if let url = manager.exportURL {
                     ShareLink(item: url) {
                         Label(L("Export pairing file"), systemImage: "square.and.arrow.up")
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(SecondaryButtonStyle())
+                    .buttonStyle(.bordered)
                     .controlSize(.regular)
+                    .tint(Theme.accent)
                     .disabled(manager.isBusy)
                 }
             }
@@ -110,8 +111,8 @@ struct PairingView: View {
 
     private var installCard: some View {
         PanelCard {
-            VStack(alignment: .leading, spacing: 16) {
-                sectionTitle(L("Install into an app"), systemImage: "tray.and.arrow.down")
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle(L("Install into an app"), systemImage: "tray.and.arrow.down.fill")
 
                 // Scanning and writing only need the tunnel, not Wi-Fi. No note
                 // when scanning starts LocalDevVPN itself.
@@ -120,9 +121,9 @@ struct PairingView: View {
                 }
 
                 Button { manager.scan() } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         if manager.isScanning {
-                            ProgressView()
+                            ProgressView().tint(.white)
                             Text(L("Scanning"))
                         } else {
                             Image(systemName: manager.hasScanned ? "arrow.clockwise" : "magnifyingglass")
@@ -138,9 +139,9 @@ struct PairingView: View {
     }
 
     private var vpnNote: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "shield.lefthalf.filled")
-                .foregroundStyle(Theme.negative)
+                .foregroundStyle(.red)
             Text(L("Connect LocalDevVPN to scan and install. The write runs over its tunnel."))
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -148,9 +149,7 @@ struct PairingView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous).fill(Theme.control))
-        .overlay(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
-            .strokeBorder(Theme.hairline, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.red.opacity(0.12)))
     }
 
     // MARK: Scanned targets
@@ -160,12 +159,12 @@ struct PairingView: View {
         if manager.hasScanned && manager.targets.isEmpty && !manager.isScanning {
             emptyTargets.transition(.cardAppear)
         } else if !manager.targets.isEmpty {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 HStack {
                     Text(manager.targets.count == 1
                          ? L("%d supported app installed", manager.targets.count)
                          : L("%d supported apps installed", manager.targets.count))
-                        .font(.subheadline.weight(.medium))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -195,7 +194,8 @@ struct PairingView: View {
             .font(.subheadline.weight(.medium))
             .frame(maxWidth: .infinity)
         }
-        .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+        .buttonStyle(.bordered)
+        .tint(Theme.brand)
         .controlSize(.regular)
         .disabled(manager.isBusy || engine.isRunning)
     }
@@ -205,7 +205,7 @@ struct PairingView: View {
             VStack(spacing: 8) {
                 Image(systemName: "questionmark.app.dashed")
                     .font(.largeTitle)
-                    .foregroundStyle(Theme.muted)
+                    .foregroundStyle(Theme.brand)
                 Text(L("No supported apps found"))
                     .font(.headline)
                 Text(L("Install an app like SideStore, StikDebug, or Feather first, then rescan."))
@@ -225,10 +225,10 @@ struct PairingView: View {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "app.dashed")
                         .font(.title3)
-                        .foregroundStyle(Theme.muted)
-                    VStack(alignment: .leading, spacing: 4) {
+                        .foregroundStyle(Theme.brand)
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(target.name)
-                            .font(.subheadline.weight(.medium))
+                            .font(.subheadline.weight(.semibold))
                         Text(target.bundleID)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -239,7 +239,7 @@ struct PairingView: View {
                 }
 
                 Button { manager.install(into: target) } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         if installing {
                             ProgressView().controlSize(.small)
                             Text(L("Installing"))
@@ -251,7 +251,8 @@ struct PairingView: View {
                     .font(.subheadline.weight(.medium))
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SecondaryButtonStyle(), sound: .tap)
+                .buttonStyle(.bordered)
+                .tint(Theme.accent)
                 .controlSize(.regular)
                 .disabled(manager.isBusy || engine.isRunning)
             }
@@ -261,7 +262,12 @@ struct PairingView: View {
     // MARK: Helpers
 
     private func sectionTitle(_ title: String, systemImage: String) -> some View {
-        SectionTitle(title: title, systemImage: systemImage)
+        Label {
+            Text(title).font(.headline)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(Theme.brand)
+        }
     }
 }
 
@@ -291,16 +297,16 @@ struct PairingPopup: View {
             }
         case .error(let message):
             PopupCard(title: L("Something went wrong"),
-                      systemImage: "exclamationmark.triangle",
-                      tint: Theme.negative,
+                      systemImage: "exclamationmark.triangle.fill",
+                      tint: .red,
                       onClose: close) {
                 ErrorMessage(message: message)
             }
         case .success(let message):
             // Titled after the page: this covers a new file and a write alike.
             PopupCard(title: L("Pairing"),
-                      systemImage: "checkmark.seal",
-                      tint: Theme.positive,
+                      systemImage: "checkmark.seal.fill",
+                      tint: .green,
                       onClose: close) {
                 Text(message)
                     .font(.subheadline)
