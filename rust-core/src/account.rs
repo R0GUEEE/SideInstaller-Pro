@@ -20,7 +20,7 @@ use isideload::{
     sideload::{
         builder::MaxCertsBehavior,
         cert_identity::CertificateIdentity,
-        sideloader::{MemoryLimit, Sideloader},
+        sideloader::Sideloader,
         SideloaderBuilder, TeamSelection,
     },
     util::{fs_storage::FsStorage, storage::SideloadingStorage},
@@ -376,7 +376,7 @@ pub unsafe fn sign_ipa(
     udid: *const c_char,
     device_name: *const c_char,
     pairing_file_path: *const c_char,
-    memory_limit: MemoryLimit,
+    memory_limit: bool,
     app_group: bool,
     out_signed_path: *mut *mut c_char,
     out_error: *mut *mut c_char,

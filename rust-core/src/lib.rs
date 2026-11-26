@@ -21,8 +21,6 @@ mod team;
 
 use std::ffi::{c_char, c_void};
 
-use isideload::sideload::sideloader::MemoryLimit;
-
 use ffi_util::cstr;
 
 // Re-export FFI types so the generated header / Swift see them.
@@ -278,11 +276,7 @@ pub unsafe extern "C" fn si_sign_ipa(
         udid,
         device_name,
         pairing_file_path,
-        match memory_limit {
-            1 => MemoryLimit::Required,
-            2 => MemoryLimit::Preferred,
-            _ => MemoryLimit::Off,
-        },
+        memory_limit != 0,
         app_group != 0,
         out_signed_path,
         out_error,
