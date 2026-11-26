@@ -5,16 +5,20 @@ import SwiftUI
 /// sign-in sheet (2FA, and which team signs) and the pages' popups, so they
 /// show over any tab.
 struct RootView: View {
-    /// The tabs. The selection is tracked so a tab switch can tick, and a
-    /// link can bring the Install tab forward.
-    private enum Page: Hashable {
-        case install, tools, about
-    }
+    /// The tabs and their backdrop level. The selection is tracked so a tab
+    /// switch can animate `Backdrop` to the new level.
+    /// The four tabs. Internal, not private: `AppRouter` asks for one by name.
+    enum Page: Hashable {
+        case install, marketplace, apps, tools
 
-    /// What the sign-in sheet shows: a 2FA prompt, or which team signs.
-    private enum SignInSheet: Equatable {
-        case twoFactor(TwoFactorPhase)
-        case team(TeamQuestion)
+        var wash: Backdrop.Level {
+            switch self {
+            case .install:     .bright
+            case .marketplace: .dark
+            case .apps:        .bright
+            case .tools:       .dark
+            }
+        }
     }
 
     /// One popup, tagged with the page that raised it.
@@ -68,9 +72,10 @@ struct RootView: View {
     /// The app's own, shared with the Shortcuts actions.
     @ObservedObject private var appsManager = SideloadedAppsManager.shared
     @StateObject private var sideBySideManager = SideBySideManager()
-    @StateObject private var sourcesManager = SourcesManager()
-    @StateObject private var jitManager = JITManager()
-    /// What the sign-in sheet showed last, so it keeps its content while it
+    /// Sources are loaded once here so their list survives tab switches and the
+    /// Inspect page can be opened from a link.
+    @StateObject private var sourceStore = SourceStore.shared
+    /// The last two-factor prompt shown, so the sheet keeps its content while it
     /// slides away after the sign-in clears it.
     @State private var shownSignInSheet: SignInSheet?
     @State private var page: Page = .install
@@ -81,19 +86,30 @@ struct RootView: View {
             ContentView()
                 .tabItem { Label(L("Install"), systemImage: "square.and.arrow.down") }
                 .tag(Page.install)
+            MarketplaceView(store: sourceStore)
+                .tabItem { Label(L("Marketplace"), systemImage: "square.grid.2x2.fill") }
+                .tag(Page.marketplace)
+            NavigationStack {
+                AppsView(sources: sourceStore, manager: appsManager)
+            }
+            .tabItem { Label(L("My Apps"), systemImage: "square.stack.3d.up.fill") }
+            .tag(Page.apps)
             ToolsView(pairingManager: pairingManager,
                       certManager: certManager,
                       locationManager: locationManager,
                       entitlementsManager: entitlementsManager,
                       appsManager: appsManager,
                       sideBySideManager: sideBySideManager,
-                      sourcesManager: sourcesManager,
-                      jitManager: jitManager)
+                      sourceStore: sourceStore)
                 .tabItem { Label(L("Tools"), systemImage: "wrench.and.screwdriver") }
                 .tag(Page.tools)
-            AboutView()
-                .tabItem { Label(L("About"), systemImage: "info.circle") }
-                .tag(Page.about)
+        }
+        // Animate the backdrop to the new tab's level.
+        .onChange(of: page) { _, page in Backdrop.settle(on: page.wash) }
+        // A run started from Tools (a source's app, or an inspected .ipa)
+        // belongs on the Install tab, where its progress is drawn.
+        .onChange(of: engine.isRunning) { _, running in
+            if running { page = .install }
         }
         // A link's install or pairing file ends up on the Install tab, so its
         // popup comes up over that.
@@ -102,6 +118,25 @@ struct RootView: View {
         }
         // A certificate a link brought is checked and imported by the same
         // manager as the Certificates page.
+        // A Shortcuts action or a notification can ask for a tab.
+        .onChange(of: AppRouter.shared.requestedPage) { _, request in
+            guard let request else { return }
+            page = request
+            AppRouter.shared.requestedPage = nil
+        }
+        // An .ipa opened from another app (share sheet, "Open with") imports,
+        // and the Install tab is where it's ready to install.
+        .onChange(of: engine.installMenuRevision) { _, _ in
+            page = .install
+        }
+        // A search sent from My Apps lands on the marketplace.
+        .onChange(of: MarketplaceRouter.shared.pendingSearch) { _, search in
+            if search != nil { page = .marketplace }
+        }
+        // A source link opens its add sheet on the Tools tab.
+        .onChange(of: engine.sourceToAdd) { _, url in
+            if url != nil { page = .tools }
+        }
         .onChange(of: engine.certificateToImport) { _, request in
             guard let request else { return }
             engine.certificateToImport = nil
@@ -548,185 +583,4 @@ struct TwoFactorSheet: View {
 enum ToolPopup: Hashable {
     case error(String)
     case success(String)
-}
-
-/// The Tools tab: a menu of utility pages. Owns the `NavigationStack` they're
-/// pushed onto, so those pages don't declare their own.
-struct ToolsView: View {
-    /// Observed so labels redraw when the language changes.
-    @EnvironmentObject private var loc: Localizer
-    /// Passed in (owned by `RootView`) so pages keep their state across tabs.
-    @ObservedObject var pairingManager: PairingManager
-    @ObservedObject var certManager: CertManager
-    @ObservedObject var locationManager: LocationManager
-    @ObservedObject var entitlementsManager: EntitlementsManager
-    @ObservedObject var appsManager: SideloadedAppsManager
-    @ObservedObject var sideBySideManager: SideBySideManager
-    @ObservedObject var sourcesManager: SourcesManager
-    @ObservedObject var jitManager: JITManager
-
-    @State private var showSettings = false
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    header.cascadeItem(0)
-                    LazyVGrid(columns: Self.columns, spacing: 12) {
-                        NavigationLink {
-                            SideBySideView(manager: sideBySideManager)
-                        } label: {
-                            ToolTile(image: "SideBySideLogo", title: L("Side by Side"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(1)
-                        // The Pairing page generates a pairing file on-device, which
-                        // needs iOS 27+. Older iOS imports it on the Install screen.
-                        if Engine.deviceCanSelfPair {
-                            NavigationLink {
-                                PairingView(manager: pairingManager)
-                            } label: {
-                                ToolTile(image: "PairingLogo", title: L("Pairing"))
-                            }
-                            .buttonStyle(.plain, sound: .tick)
-                            .cascadeItem(2)
-                        }
-                        NavigationLink {
-                            JITView(manager: jitManager)
-                        } label: {
-                            ToolTile(image: "JITLogo", title: L("JIT"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(2))
-                        NavigationLink {
-                            CertsView(manager: certManager)
-                        } label: {
-                            ToolTile(image: "CertsLogo", title: L("Certificates"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(3))
-                        NavigationLink {
-                            EntitlementsView(manager: entitlementsManager)
-                        } label: {
-                            ToolTile(image: "EntitlementsLogo", title: L("Entitlements"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(4))
-                        NavigationLink {
-                            LocationView(manager: locationManager)
-                        } label: {
-                            ToolTile(image: "LocationLogo", title: L("Location spoofing"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(5))
-                        NavigationLink {
-                            AppsView(manager: appsManager)
-                        } label: {
-                            ToolTile(image: "AppsLogo", title: L("Sideloaded apps"))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(6))
-                        NavigationLink {
-                            SourcesView(manager: sourcesManager, appsManager: appsManager)
-                        } label: {
-                            ToolTile(image: "SourcesLogo", title: L("Sources"),
-                                     count: sourcesManager.updateCount(installed: appsManager.entries))
-                        }
-                        .buttonStyle(.plain, sound: .tick)
-                        .cascadeItem(rowIndex(7))
-                    }
-                }
-                // No bottom padding: the tab bar's inset already clears the last
-                // row of tiles, and the extra 20pt would make a page that fits scroll.
-                .padding([.horizontal, .top], 20)
-                .pageColumn()
-            }
-            // Still unless the tiles don't all fit on the screen.
-            .scrollBounceBehavior(.basedOnSize)
-            .background(AppBackground())
-            .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-            .sheet(isPresented: $showSettings) { SettingsView() }
-        }
-    }
-
-    /// Two square tiles to a row.
-    private static let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 2)
-
-    /// Cascade index for rows below Pairing, shifted by one when that row is shown.
-    private func rowIndex(_ position: Int) -> Int {
-        Engine.deviceCanSelfPair ? position + 1 : position
-    }
-
-    /// Just the title: the tiles below carry the iconography on this page.
-    private var header: some View {
-        Text(L("Tools"))
-            .font(.largeTitle.weight(.medium))
-            .frame(maxWidth: .infinity)
-            .padding(.top, 8)
-    }
-}
-
-/// One Tools menu tile: a square with the logo above the name. Pages without
-/// logo art pass an SF Symbol, drawn on a plain tile at the same size.
-private struct ToolTile: View {
-    var image: String? = nil
-    var icon: String? = nil
-    var title: String
-    /// Shows a Beta badge in the top corner.
-    var beta: Bool = false
-    /// A count in the top corner, such as the updates Sources found. 0 hides it.
-    var count: Int = 0
-
-    var body: some View {
-        let logo = RoundedRectangle(cornerRadius: 16, style: .continuous)
-        let tile = RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
-        return VStack(spacing: 12) {
-            glyph
-                .frame(width: 64, height: 64)
-                .clipShape(logo)
-                // The art's black tile would melt into the card without it.
-                .overlay(logo.strokeBorder(Theme.hairline, lineWidth: 1))
-            Text(title)
-                .font(.body.weight(.medium))
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.7)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .aspectRatio(1, contentMode: .fit)
-        .overlay(alignment: .topTrailing) {
-            if beta {
-                BetaBadge()
-                    .padding(12)
-            }
-            if count > 0 {
-                Text("\(count)")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(minWidth: 24, minHeight: 24)
-                    .padding(.horizontal, count > 9 ? 4 : 0)
-                    .background(Capsule().fill(Theme.warning))
-                    .padding(12)
-                    .accessibilityLabel(count == 1 ? L("%d update", count) : L("%d updates", count))
-            }
-        }
-        .cardSurface(in: tile)
-        .contentShape(tile)
-    }
-
-    @ViewBuilder
-    private var glyph: some View {
-        if let image {
-            Image(image)
-                .logoArt()
-        } else {
-            ZStack {
-                Rectangle().fill(Theme.raised)
-                Image(systemName: icon ?? "questionmark")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 }

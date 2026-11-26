@@ -10,7 +10,6 @@ struct PairingView: View {
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: PairingManager
 
-    @State private var showSettings = false
 
     var body: some View {
         ScrollView {
@@ -32,8 +31,6 @@ struct PairingView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(AppBackground())
-        .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-        .sheet(isPresented: $showSettings) { SettingsView() }
         .onAppear {
             manager.refresh()
             manager.autoScan()

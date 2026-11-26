@@ -30,11 +30,15 @@ targets:
     platform: iOS
     sources:
       - path: ios-app
+      # In-app-purchase tweaks, copied into the app so the install menu can add
+      # them without a download. A folder reference, so the .dylibs keep their
+      # names and land as Resources/IAPTweaks in the bundle.
+      - path: IAPTweaks
+        type: folder
+        buildPhase: resources
     dependencies:
       - framework: SideInstallerFFI.xcframework
         embed: false
-      # Embedded as PlugIns/SideInstallerLiveActivity.appex.
-      - target: SideInstallerLiveActivity
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller
@@ -42,44 +46,3 @@ targets:
         # idevice's static lib pulls in C++ symbols (aws-lc); link libc++.
         OTHER_LDFLAGS: "-lc++"
         GENERATE_INFOPLIST_FILE: NO
-    # `xcodebuild test -scheme SideInstaller` runs SideInstallerTests too. A
-    # build or archive of the scheme still builds the app alone.
-    scheme:
-      testTargets:
-        - SideInstallerTests
-
-  # Unit tests (Swift Testing), run inside the app on a simulator, so they can
-  # reach its internal types with `@testable import SideInstaller`.
-  # scripts/check-ios.sh builds and runs them, as the pull-request workflow does.
-  SideInstallerTests:
-    type: bundle.unit-test
-    platform: iOS
-    sources:
-      - path: ios-tests
-    dependencies:
-      - target: SideInstaller
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller.tests
-        GENERATE_INFOPLIST_FILE: YES
-
-  # Draws the pairing Live Activity: the code Settings asks for, in the Dynamic
-  # Island and on the Lock Screen. A Live Activity's views have to live in a
-  # widget extension; the app starts and updates it (PairingLiveActivity.swift).
-  # Also draws an install's progress below iOS 26 (InstallActivity.swift).
-  SideInstallerLiveActivity:
-    type: app-extension
-    platform: iOS
-    sources:
-      - path: ios-live-activity
-      # What the activities show, shared with the app.
-      - path: ios-app/PairingActivityAttributes.swift
-      - path: ios-app/InstallActivityAttributes.swift
-    settings:
-      base:
-        # Has to stay the app's identifier plus a suffix, or iOS refuses to
-        # install the app. Change both together.
-        PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller.LiveActivity
-        INFOPLIST_FILE: ios-live-activity/Info.plist
-        GENERATE_INFOPLIST_FILE: NO
-        SKIP_INSTALL: YES

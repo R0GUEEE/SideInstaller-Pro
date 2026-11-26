@@ -444,10 +444,15 @@ pub unsafe fn sign_ipa(
             0
         }
         Ok(Err(e)) => {
+            // Log only diagnostic metadata here; the actual message follows the
+            // normal FFI path and Swift's log redaction, never keys or profiles.
+            tracing::error!(code = 1, bytes = e.len(), contains_nul = e.as_bytes().contains(&0),
+                            "Signing returned an error");
             *out_error = cstr(e);
             1
         }
         Err(_) => {
+            tracing::error!(code = 2, "Signing panicked");
             *out_error = cstr("panic during signing");
             2
         }
@@ -670,8 +675,7 @@ pub unsafe fn signing_account(
 /// What signing an app would cost in App IDs, for the confirmation before it.
 #[derive(Serialize, Debug, PartialEq)]
 struct AppIdQuota {
-    /// The identifiers `sign_app` would register: the main app's, unless the
-    /// team has it already. Extensions don't get one.
+    /// The main and extension identifiers that the team has not registered yet.
     new_ids: Vec<String>,
     /// How many more Apple says the team can register now. None when Apple
     /// doesn't say or reports a negative number (`register_app_ids` skips its
@@ -685,9 +689,8 @@ struct AppIdQuota {
 }
 
 /// The quota for signing an app whose main bundle ID is `bundle_id` (as the
-/// IPA has it) against the team's App IDs as listed. `sign_app` registers one
-/// App ID, the bundle ID suffixed by the team ID (`Application::update_bundle_id`);
-/// extensions are signed with the main app's profile and get none.
+/// IPA has it) against the team's App IDs as listed. Extension costs are added
+/// by `app_id_quota_with_extensions` using the same rewrite as the signer.
 fn app_id_quota(bundle_id: &str, team_id: &str, listing: &ListAppIdsResponse) -> AppIdQuota {
     let main_id = format!("{bundle_id}.{team_id}");
     let new_ids = if listing.app_ids.iter().any(|a| a.identifier == main_id) {
@@ -710,6 +713,74 @@ fn app_id_quota(bundle_id: &str, team_id: &str, listing: &ListAppIdsResponse) ->
     }
 }
 
+/// Whether the team's profiles are all wildcard ones, read the same way the
+/// signer reads them: a team made only of `TEAM.*` profiles needs no App ID for
+/// an app or its extensions.
+fn wildcard_profiles_cover_team(session: &mut SignSession) -> Result<bool, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Entry {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listing {
+        #[serde(default)]
+        provisioning_profiles: Vec<Entry>,
+    }
+
+    // The runtime and the signer are borrowed together, the way `sign_ipa`
+    // does it: the future only ever holds the mutable one.
+    let (rt, sideloader) = (&session.rt, &mut session.sideloader);
+    rt.block_on(async {
+        let team = sideloader
+            .get_team()
+            .await
+            .map_err(|e| format!("get_team: {}", report_text(&e)))?;
+        let body = plist::Dictionary::from_iter([(
+            "teamId".to_string(),
+            plist::Value::String(team.team_id.clone()),
+        )]);
+        let url = "https://developerservices2.apple.com/services/QH65B2/ios/listProvisioningProfiles.action?clientId=XABBG36SBA";
+        let listed: Result<Listing, _> = sideloader
+            .get_dev_session()
+            .send_dev_request(url, body, "provisioningProfileList")
+            .await;
+        let Ok(listing) = listed else {
+            return Ok(false);
+        };
+        Ok(!listing.provisioning_profiles.is_empty()
+            && listing.provisioning_profiles.iter().all(|entry| {
+                entry
+                    .kind
+                    .as_deref()
+                    .map(|k| k.to_ascii_uppercase().contains("WILDCARD"))
+                    .unwrap_or(false)
+                    || entry.name.as_deref().map(|n| n.contains(".*")).unwrap_or(false)
+            }))
+    })
+}
+
+fn app_id_quota_with_extensions(
+    main: &str, extensions: &[String], team: &str, listing: &ListAppIdsResponse,
+) -> Result<AppIdQuota, String> {
+    let mut quota = app_id_quota(main, team, listing);
+    for extension in extensions {
+        let suffix = extension.strip_prefix(&format!("{main}."))
+            .filter(|suffix| !suffix.is_empty())
+            .ok_or_else(|| format!("Extension {extension} is not a child of {main}"))?;
+        let id = format!("{main}.{team}.{suffix}");
+        if !listing.app_ids.iter().any(|app| app.identifier == id)
+            && !quota.new_ids.contains(&id) {
+            quota.new_ids.push(id);
+        }
+    }
+    Ok(quota)
+}
+
 /// Set `*out_json` to the [`AppIdQuota`] for signing an app whose main bundle
 /// ID is `bundle_id`. Lists the team's App IDs, as signing does first;
 /// registers nothing.
@@ -727,26 +798,54 @@ pub unsafe fn appid_quota(
         return 2;
     }
     let session = &mut *session;
+    // The ABI accepts either a legacy main ID or a JSON array: main first,
+    // followed by the retained extension IDs from the patched IPA.
     let bundle_id = opt(bundle_id, "").trim().to_string();
     if bundle_id.is_empty() {
         *out_error = cstr("no bundle ID");
         return 2;
     }
 
+    // Read before the future borrows the session: the check wants the whole
+    // session, the account listing below wants its parts.
+    let wildcard = match wildcard_profiles_cover_team(session) {
+        Ok(wildcard) => wildcard,
+        Err(e) => {
+            *out_error = cstr(e);
+            return 1;
+        }
+    };
+
     let result = catch_unwind(AssertUnwindSafe(|| {
-        session.rt.block_on(async {
-            let team = session
-                .sideloader
+        let (rt, sideloader) = (&session.rt, &mut session.sideloader);
+        rt.block_on(async {
+            let team = sideloader
                 .get_team()
                 .await
                 .map_err(|e| format!("get_team: {}", report_text(&e)))?;
-            let listing = session
-                .sideloader
+            let listing = sideloader
                 .get_dev_session()
                 .list_app_ids(&team, None)
                 .await
                 .map_err(|e| format!("list app IDs failed: {}", report_text(&e)))?;
-            let quota = app_id_quota(&bundle_id, &team.team_id, &listing);
+            let ids: Vec<String> = if bundle_id.starts_with('[') {
+                serde_json::from_str(&bundle_id).map_err(|e| format!("Invalid bundle IDs: {e}"))?
+            } else {
+                vec![bundle_id.clone()]
+            };
+            let main = ids.first().filter(|id| !id.is_empty())
+                .ok_or_else(|| "Missing main bundle ID".to_string())?;
+            // A team whose profiles are wildcard ones (`TEAM.*`) covers every
+            // identifier already, so signing registers nothing and the estimate
+            // must say so; otherwise the install menu asks for an approval that
+            // costs no App ID at all.
+            let quota = if wildcard {
+                let mut plain = app_id_quota(main, &team.team_id, &listing);
+                plain.new_ids.clear();
+                plain
+            } else {
+                app_id_quota_with_extensions(main, &ids[1..], &team.team_id, &listing)?
+            };
             tracing::info!(
                 "App IDs: {} new for this app, {:?} of {:?} available",
                 quota.new_ids.len(),
@@ -1113,7 +1212,16 @@ mod app_id_quota_tests {
     }
 
     #[test]
-    fn only_the_main_app_needs_an_app_id() {
+    fn extensions_cost_distinct_ids_and_existing_ones_are_reused() {
+        let listing = listing(vec![app_id("a.b.T.Widget", None)], Some(5));
+        let quota = app_id_quota_with_extensions("a.b", &ids(&["a.b.Widget", "a.b.Share", "a.b.Share"]), "T", &listing).unwrap();
+        assert_eq!(quota.new_ids, ids(&["a.b.T", "a.b.T.Share"]));
+        assert_eq!(quota.available, Some(5));
+        assert!(app_id_quota_with_extensions("a.b", &ids(&["other.Widget"]), "T", &listing).is_err());
+    }
+
+    #[test]
+    fn an_app_without_extensions_needs_one_app_id() {
         let quota = app_id_quota(
             "com.example.App",
             "TEAM123456",
@@ -1156,3 +1264,4 @@ mod app_id_quota_tests {
         assert_eq!(quota.next_expiry, None);
     }
 }
+

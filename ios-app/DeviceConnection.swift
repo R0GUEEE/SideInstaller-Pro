@@ -1158,6 +1158,233 @@ final class DeviceConnection {
         return out
     }
 
+    /// An installed app's icon, rendered by the device at `side` points.
+    ///
+    /// `app_service` (the CoreDevice one, over the same RSD link as the install)
+    /// draws it from the app's own icons, so this works for any app on the
+    /// device — not just ones whose .ipa is still in Documents.
+    func appIcon(bundleID: String, side: CGFloat) throws -> Data? {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(app_service_connect_rsd(adapter, handshake, &client),
+                  "app_service_connect_rsd failed")
+        guard let client else { throw fail("app_service client was null") }
+        defer { app_service_free(client) }
+
+        var icon: UnsafeMutablePointer<IconDataC>?
+        let error = bundleID.withCString {
+            app_service_fetch_app_icon(client, $0, Float(side), Float(side), 2, 1, &icon)
+        }
+        try check(error, "app_service_fetch_app_icon failed")
+        guard let icon else { return nil }
+        defer { app_service_free_icon_data(icon) }
+        guard let bytes = icon.pointee.data, icon.pointee.data_len > 0 else { return nil }
+        return Data(bytes: bytes, count: Int(icon.pointee.data_len))
+    }
+
+    /// Launches an installed app on the device.
+    ///
+    /// `app_service` starts it the way the Home Screen would, so no URL scheme
+    /// is needed. Returns the launched process ID when the device reports one.
+    @discardableResult
+    func launchApp(bundleID: String) throws -> UInt32 {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(app_service_connect_rsd(adapter, handshake, &client),
+                  "app_service_connect_rsd failed")
+        guard let client else { throw fail("app_service client was null") }
+        defer { app_service_free(client) }
+
+        var response: UnsafeMutablePointer<LaunchResponseC>?
+        let error = bundleID.withCString {
+            app_service_launch_app(client, $0, nil, 0, 1, 0, nil, &response)
+        }
+        try check(error, "app_service_launch_app failed")
+        defer { if let response { app_service_free_launch_response(response) } }
+        return response?.pointee.pid ?? 0
+    }
+
+    // MARK: - Debugging (JIT)
+
+    /// Launches an installed app suspended and returns the DVT handle that can
+    /// kill it again, or `nil` when the device launched it without one.
+    ///
+    /// Process control is how Xcode starts a process it means to debug; the
+    /// process is stopped at its entry point, which is where a debugger attaches.
+    func launchDebugProcess(bundleID: String,
+                            environment: [String: String] = [:]) throws -> DebugLaunch {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var server: OpaquePointer?
+        try check(remote_server_connect_rsd(adapter, handshake, &server),
+                  "remote_server_connect_rsd failed")
+        guard let server else { throw fail("remote server was null") }
+        defer { remote_server_free(server) }
+
+        var control: OpaquePointer?
+        try check(process_control_new(server, &control), "process_control_new failed")
+        guard let control else { throw fail("process control was null") }
+        defer { process_control_free(control) }
+
+        let variables = environment.map { "\($0.key)=\($0.value)" }
+        var pointers: [UnsafePointer<CChar>?] = variables.map { strdup($0).map { UnsafePointer($0) } }
+        pointers.append(nil)
+        defer { pointers.forEach { $0.map { free(UnsafeMutablePointer(mutating: $0)) } } }
+
+        var pid: UInt64 = 0
+        let error = pointers.withUnsafeBufferPointer { buffer -> UnsafeMutablePointer<IdeviceFfiError>? in
+            bundleID.withCString { name in
+                process_control_launch_app(control, name, buffer.baseAddress, UInt(variables.count),
+                                           nil, 0, true, true, &pid)
+            }
+        }
+        try check(error, "process_control_launch_app failed")
+        return DebugLaunch(pid: pid)
+    }
+
+    /// Ends a process started by `launchDebugProcess`.
+    func killDebugProcess(pid: UInt64) throws {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var server: OpaquePointer?
+        try check(remote_server_connect_rsd(adapter, handshake, &server),
+                  "remote_server_connect_rsd failed")
+        guard let server else { throw fail("remote server was null") }
+        defer { remote_server_free(server) }
+        var control: OpaquePointer?
+        try check(process_control_new(server, &control), "process_control_new failed")
+        guard let control else { throw fail("process control was null") }
+        defer { process_control_free(control) }
+        try check(process_control_kill_app(control, pid), "process_control_kill_app failed")
+    }
+
+    /// A process stopped at its entry point, waiting for a debugger.
+    struct DebugLaunch {
+        let pid: UInt64
+    }
+
+    /// A failure the JIT session can describe to the user.
+    struct DebugError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Icons for several apps at once, over one `app_service` connection.
+    ///
+    /// Opening the service per icon is what made the app list crawl: each call
+    /// reconnects and re-handshakes. One connection for the batch costs one.
+    func appIcons(bundleIDs: [String], side: CGFloat) throws -> [String: Data] {
+        guard !bundleIDs.isEmpty else { return [:] }
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(app_service_connect_rsd(adapter, handshake, &client),
+                  "app_service_connect_rsd failed")
+        guard let client else { throw fail("app_service client was null") }
+        defer { app_service_free(client) }
+
+        var out: [String: Data] = [:]
+        out.reserveCapacity(bundleIDs.count)
+        for bundleID in bundleIDs {
+            var icon: UnsafeMutablePointer<IconDataC>?
+            let error = bundleID.withCString {
+                app_service_fetch_app_icon(client, $0, Float(side), Float(side), 2, 1, &icon)
+            }
+            guard error == nil, let icon else { continue }
+            if let bytes = icon.pointee.data, icon.pointee.data_len > 0 {
+                out[bundleID] = Data(bytes: bytes, count: Int(icon.pointee.data_len))
+            }
+            app_service_free_icon_data(icon)
+        }
+        return out
+    }
+
+    /// Whether an app has a live process. Uses `app_service`'s process list,
+    /// which needs no debugger and so can check a running app without stopping it.
+    func isProcessRunning(bundleID: String) throws -> Bool {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(app_service_connect_rsd(adapter, handshake, &client),
+                  "app_service_connect_rsd failed")
+        guard let client else { throw fail("app_service client was null") }
+        defer { app_service_free(client) }
+
+        var processes: UnsafeMutablePointer<ProcessTokenC>?
+        var count: UInt = 0
+        try check(app_service_list_processes(client, &processes, &count),
+                  "app_service_list_processes failed")
+        guard let processes else { return false }
+        // Copied out before the list is freed: the entry points into it.
+        var running = false
+        for index in 0..<Int(count) where !running {
+            if let path = processes[index].executable_url {
+                // The executable's path carries the bundle's own name.
+                running = String(cString: path).contains("/\(bundleID)/")
+            }
+        }
+        app_service_free_process_list(processes, count)
+        return running
+    }
+
+    /// Opens the device's debugger server connection: what a debugger speaks
+    /// GDB-remote to. The handle is kept for the life of the session.
+    func debugProxy() throws -> OpaquePointer {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var proxy: OpaquePointer?
+        try check(debug_proxy_connect_rsd(adapter, handshake, &proxy),
+                  "debug_proxy_connect_rsd failed")
+        guard let proxy else { throw fail("debug proxy was null") }
+        return proxy
+    }
+
+    /// Sends one GDB-remote packet: `m<hex string>` to read memory, and so on.
+    func sendDebugPacket(_ proxy: OpaquePointer, _ packet: String) throws -> String {
+        // The packet goes in as the command name; the proxy hex-encodes only the
+        // separate argv, so anything with arguments is built up by the caller.
+        let parts = packet.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+        let name = String(parts.first ?? "")
+        let arguments = parts.count > 1 ? [String(parts[1])] : []
+        return try sendDebugCommand(proxy, name, arguments: arguments)
+    }
+
+    /// Sends one command name with optional arguments, the way the proxy's own
+    /// `send_command` does: the name verbatim, each argument hex-encoded.
+    func sendDebugCommand(_ proxy: OpaquePointer, _ name: String,
+                          arguments: [String] = []) throws -> String {
+        var pointers: [UnsafePointer<CChar>?] = arguments.map { strdup($0).map { UnsafePointer($0) } }
+        pointers.append(nil)
+        defer { pointers.forEach { $0.map { free(UnsafeMutablePointer(mutating: $0)) } } }
+        let command = pointers.withUnsafeBufferPointer { buffer in
+            name.withCString { namePointer in
+                debugserver_command_new(namePointer, buffer.baseAddress, UInt(arguments.count))
+            }
+        }
+        guard let command else { throw fail("couldn't build the \(name) command") }
+        defer { debugserver_command_free(command) }
+        var response: UnsafeMutablePointer<CChar>?
+        let error = debug_proxy_send_command(proxy, command, &response)
+        try check(error, "\(name) failed")
+        guard let response else { return "" }
+        defer { si_string_free(response) }
+        return String(cString: response)
+    }
+
+    func closeDebugProxy(_ proxy: OpaquePointer) {
+        debug_proxy_free(proxy)
+    }
+
+    /// Removes an installed app from the device.
+    ///
+    /// `installation_proxy` does this over the same RSD link as the install, so
+    /// no AFC staging is involved: the app is simply gone, with its data.
+    func uninstall(bundleID: String) throws {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(installation_proxy_connect_rsd(adapter, handshake, &client),
+                  "installation_proxy_connect_rsd failed")
+        guard let client else { throw fail("installation_proxy client was null") }
+        defer { installation_proxy_client_free(client) }
+        let error = bundleID.withCString { installation_proxy_uninstall(client, $0, nil) }
+        try check(error, "installation_proxy_uninstall failed")
+    }
+
     /// Every installed app's full installation_proxy plist, including
     /// `Entitlements` and `ProfileValidated`, which identify sideloaded apps.
     ///
@@ -2486,3 +2713,106 @@ final class DebugServerSession {
         dvtLock.unlock()
     }
 }
+
+extension DeviceConnection {
+    /// Probe each permission independently: a failed vend consumes its client.
+    func appFileAccess(_ bundleID: String) throws -> Bool {
+        do {
+            return try withAppContainer(bundleID, reachingLibrary: true) { afc in
+                _ = try appFileNames(afc, path: "/")
+                return true
+            }
+        } catch {
+            return try withAppContainer(bundleID, reachingLibrary: false) { afc in
+                _ = try appFileNames(afc, path: "/Documents")
+                return false
+            }
+        }
+    }
+
+    func appFiles(_ bundleID: String, full: Bool, path: String) throws -> [AppFileEntry] {
+        try withAppContainer(bundleID, reachingLibrary: full) { afc in
+            try validateAppDirectory(afc, path: path, root: full ? "/" : "/Documents")
+            let names = try appFileNames(afc, path: path)
+            guard names.count <= 10000 else { throw fail("Folder exceeds the 10,000 entry browsing limit.") }
+            return try names.map { name in
+                guard let child = AppFilePath.child(name, of: path) else { throw fail("Invalid file name returned by device.") }
+                return try appFileInfo(afc, path: child)
+            }.sorted {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        }
+    }
+
+    /// Deletes contents without following symlinks. No container or system root
+    /// can be removed; cleanup preserves the Documents/Caches/tmp directories.
+    func deleteAppFiles(_ bundleID: String, full: Bool, path: String, contentsOnly: Bool) throws {
+        let root = full ? "/" : "/Documents"
+        guard bundleID != Bundle.main.bundleIdentifier else { throw fail("Use Stored builds to clean SideInstaller's storage.") }
+        guard AppFilePath.valid(path, root: root),
+              contentsOnly ? ["/Documents", "/Library/Caches", "/tmp"].contains(path)
+                           : AppFilePath.deletable(path, root: root) else { throw fail("Protected storage path.") }
+        try withAppContainer(bundleID, reachingLibrary: full) { afc in
+            let parent = (path as NSString).deletingLastPathComponent
+            try validateAppDirectory(afc, path: parent, root: "/")
+            var remaining = 10000
+            let deadline = Date().addingTimeInterval(30)
+            func remove(_ target: String, depth: Int) throws {
+                remaining -= 1
+                guard remaining >= 0, depth < 64, Date() < deadline else {
+                    throw fail("Cleanup limit reached. Some files may already be deleted; refresh and retry.")
+                }
+                let info = try appFileInfo(afc, path: target)
+                if info.isDirectory {
+                    try validateAppDirectory(afc, path: target, root: root)
+                    for name in try appFileNames(afc, path: target) {
+                        guard let child = AppFilePath.child(name, of: target) else { throw fail("Invalid file name.") }
+                        try remove(child, depth: depth + 1)
+                    }
+                }
+                try check(target.withCString { afc_remove_path(afc, $0) }, "Could not delete \(target)")
+            }
+            if contentsOnly {
+                try validateAppDirectory(afc, path: path, root: root)
+                for name in try appFileNames(afc, path: path) {
+                    guard let child = AppFilePath.child(name, of: path) else { throw fail("Invalid file name.") }
+                    try remove(child, depth: 0)
+                }
+            } else {
+                try remove(path, depth: 0)
+            }
+        }
+    }
+
+    private func validateAppDirectory(_ afc: OpaquePointer, path: String, root: String) throws {
+        guard AppFilePath.valid(path, root: root) else { throw fail("Path is outside accessible storage.") }
+        var current = ""
+        for component in path.split(separator: "/") {
+            current += "/" + component
+            guard try appFileInfo(afc, path: current).isDirectory else {
+                throw fail("Cannot traverse a symbolic link or non-directory: \(current)")
+            }
+        }
+    }
+
+    private func appFileInfo(_ afc: OpaquePointer, path: String) throws -> AppFileEntry {
+        var info = AfcFileInfo()
+        try check(path.withCString { afc_get_file_info(afc, $0, &info) }, "Could not read \(path)")
+        defer { afc_file_info_free(&info) }
+        return AppFileEntry(path: path, name: (path as NSString).lastPathComponent,
+                            size: Int64(clamping: info.size),
+                            kind: info.st_ifmt.map { String(cString: $0) } ?? "unknown")
+    }
+
+    private func appFileNames(_ afc: OpaquePointer, path: String) throws -> [String] {
+        var entries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var count = 0
+        try check(path.withCString { afc_list_directory(afc, $0, &entries, &count) }, "Could not list \(path)")
+        guard let entries else { return [] }
+        defer {
+            for i in 0..<count { if let entry = entries[i] { idevice_string_free(entry) } }
+            free(entries)
+        }
+        return (0..<count).compactMap { entries[$0].map { String(cString: $0) } }
+            .filter { $0 != "." && $0 != ".." }

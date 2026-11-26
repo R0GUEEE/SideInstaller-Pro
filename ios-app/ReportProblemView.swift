@@ -14,6 +14,10 @@ struct ReportProblemView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var description = ""
+    /// The report is built once and kept: it walks the whole activity log and
+    /// redacts every line, and a body that rebuilt it per keystroke made typing
+    /// the description stutter.
+    @State private var report: ProblemReport?
     /// Crash logs read from this iPhone; nil until it's been asked.
     @State private var deviceCrashes: [DeviceCrashLog]?
     @State private var lookingForCrashes = false
@@ -36,7 +40,7 @@ struct ReportProblemView: View {
     }
 
     var body: some View {
-        let report = ProblemReport.current(engine)
+        let report = self.report ?? ProblemReport.current(engine)
         NavigationStack {
             Form {
                 descriptionSection
@@ -63,6 +67,7 @@ struct ReportProblemView: View {
             }
         }
         .task {
+            if self.report == nil { self.report = report }
             // Only while the tunnel is already up: opening LocalDevVPN unasked
             // would be a surprise.
             if engine.vpnConnected && engine.hasPairingFile && !engine.isRunning {

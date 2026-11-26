@@ -1037,9 +1037,11 @@ enum SideStoreDownloader {
                     try FileManager.default.moveItem(at: file, to: dest)
                     cont.resume(returning: dest)
                 } catch let urlError as URLError {
+                    try? FileManager.default.removeItem(at: staging)
                     cont.resume(throwing: urlError.code == .cancelled
                                 ? CancellationError() : DownloadError.unreachable(urlError))
                 } catch {
+                    try? FileManager.default.removeItem(at: staging)
                     cont.resume(throwing: error)
                 }
             }
@@ -1869,7 +1871,15 @@ enum IPALibrary {
                          version: isManaged
                              ? kind.source.version(inFileName: name, channel: kind.channel) : nil)
         }
-        return (entries + [customImport()].compactMap { $0 })
+        // Every build SideInstaller installed keeps a copy for re-signing; those
+        // count as installable too, which is what lets My Apps re-sign an app
+        // whose original download is long gone.
+        let cached = IPACache.all().map { entry in
+            Entry(source: .custom, channel: .stable, url: entry.url,
+                  size: Int(entry.bytes), modified: entry.savedAt,
+                  isImported: true, version: nil)
+        }
+        return (entries + cached + [customImport()].compactMap { $0 })
             .sorted { ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
     }
 
@@ -2339,6 +2349,42 @@ extension IPALibrary {
             if ended { return written }
         }
         return nil          // the zip ended before the stream did
+    /// The first `limit` bytes of a member, without inflating all of it.
+    ///
+    /// A Mach-O's load commands — including the name of every library it
+    /// links — sit at the very start of the binary, so reading a 90 MB
+    /// executable's header costs a few megabytes instead of the whole thing.
+    /// A member whose compressed size is over 64 MB is refused rather than read:
+    /// no app binary that matters here needs that.
+    static func prefix(of file: ArchiveFile, in url: URL, limit: Int) -> Data? {
+        guard limit > 0, file.size > 0,
+              file.entry.compressedSize > 0, file.entry.compressedSize <= 64 << 20,
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard (try? handle.seek(toOffset: UInt64(file.entry.localHeaderOffset))) != nil,
+              let header = try? handle.read(upToCount: 30), header.count == 30,
+              u32(header, 0) == 0x0403_4B50 else { return nil }
+        // The local header repeats the name and carries its own extra field,
+        // whose length routinely differs from the central directory's.
+        let dataOffset = file.entry.localHeaderOffset + 30 + u16(header, 26) + u16(header, 28)
+        guard (try? handle.seek(toOffset: UInt64(dataOffset))) != nil,
+              let raw = try? handle.read(upToCount: file.entry.compressedSize),
+              raw.count == file.entry.compressedSize else { return nil }
+        if file.entry.method == 0 { return raw.prefix(limit) }
+        guard file.entry.method == 8 else { return nil }
+        // A destination smaller than the member stops the inflate at `limit`
+        // and returns what it wrote, which is exactly the prefix wanted.
+        var out = Data(count: limit)
+        let written = out.withUnsafeMutableBytes { dst -> Int in
+            guard let target = dst.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+            return raw.withUnsafeBytes { src -> Int in
+                guard let source = src.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(target, limit, source, raw.count, nil,
+                                                 COMPRESSION_ZLIB)
+            }
+        }
+        guard written > 0 else { return nil }
+        return out.prefix(written)
     }
 
     /// `COMPRESSION_ZLIB` is raw DEFLATE with no zlib wrapper, which is exactly
@@ -2639,3 +2685,4 @@ enum DownloadLedger {
         etags = e
     }
 }
+

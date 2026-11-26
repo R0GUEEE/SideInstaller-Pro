@@ -8,7 +8,6 @@ struct CertsView: View {
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: CertManager
 
-    @State private var showSettings = false
     /// The certificate the user tapped "Revoke" on, pending confirmation.
     @State private var pendingRevoke: DevCert?
     /// The certificate the user tapped "Export" on, pending a password (or none).
@@ -49,8 +48,6 @@ struct CertsView: View {
             .animation(.smooth(duration: 0.35), value: manager.teamSummary)
         }
         .background(AppBackground())
-        .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-        .sheet(isPresented: $showSettings) { SettingsView() }
         .onAppear { manager.autoLoad() }
         .alert(L("Revoke this certificate?"),
                isPresented: Binding(get: { pendingRevoke != nil },

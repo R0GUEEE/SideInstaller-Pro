@@ -39,12 +39,24 @@ struct DevCert: Identifiable, Decodable, Equatable {
     }
 
     /// `expiration` parsed to a `Date`, if present and well-formed.
+    ///
+    /// The formatters are shared: the expiry is read again every time a page
+    /// showing it redraws, and building an `ISO8601DateFormatter` per call is
+    /// the expensive half of that.
+    private static let expiryFormatters: [ISO8601DateFormatter] = {
+        let internet = ISO8601DateFormatter()
+        internet.formatOptions = [.withInternetDateTime]
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return [internet, fractional, ISO8601DateFormatter()]
+    }()
+
     var expiresAt: Date? {
         guard !expiration.isEmpty else { return nil }
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f.date(from: expiration)
-            ?? ISO8601DateFormatter().date(from: expiration)
+        for formatter in Self.expiryFormatters {
+            if let date = formatter.date(from: expiration) { return date }
+        }
+        return nil
     }
 
     /// True once the expiry date is in the past.

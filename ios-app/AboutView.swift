@@ -2,13 +2,16 @@ import SwiftUI
 import UIKit
 import CoreImage.CIFilterBuiltins
 
-/// About tab: version, project links and credits. Owns its `NavigationStack`
-/// for the settings toolbar.
+/// About page: version, project links and credits. Owns its `NavigationStack`
+/// so it can also be presented as a sheet (Tools › About).
 struct AboutView: View {
+    /// True when presented as a sheet: pushed from Settings it has the back
+    /// button, but a sheet needs its own way out.
+    var showsDone = false
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
+    @Environment(\.dismiss) private var dismiss
 
-    @State private var showSettings = false
     @State private var showCrypto = false
     @State private var showReport = false
 
@@ -26,8 +29,13 @@ struct AboutView: View {
                 .pageColumn()
             }
             .background(AppBackground())
-            .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-            .sheet(isPresented: $showSettings) { SettingsView() }
+            .toolbar {
+                if showsDone {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button(L("Done")) { dismiss() }
+                    }
+                }
+            }
             .sheet(isPresented: $showCrypto) { CryptoDonationsView() }
             .sheet(isPresented: $showReport) { ReportProblemView() }
         }
@@ -342,14 +350,24 @@ private struct QRCodeView: View {
 
     private static let context = CIContext()
 
+    /// Drawn once per address, off the main actor: Core Image in a body is
+    /// work on every redraw for an image that never changes.
+    @State private var image: UIImage?
+
     var body: some View {
-        if let image = Self.render(text) {
-            Image(uiImage: image)
-                .interpolation(.none)
-                .resizable()
-                .scaledToFit()
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous).fill(.white))
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white))
+            }
+        }
+        .task(id: text) {
+            guard image == nil else { return }
+            image = await Task.detached(priority: .utility) { Self.render(text) }.value
         }
     }
 

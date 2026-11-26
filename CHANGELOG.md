@@ -2,6 +2,608 @@
 
 All notable changes to SideInstaller are documented here.
 
+## Unreleased
+
+### Fixed
+- **App extensions are prepared for signing properly.** A nested bundle is now given an identifier
+  that sits under the app's — keeping its own name (`LiveActivity`) through a rename instead of
+  taking the folder's, and re-prefixing one that was outside the app at all — gets its **own**
+  entitlements file with `application-identifier` and keychain groups naming it (the team prefix
+  kept), and has its stale `embedded.mobileprovision` dropped so the signer's fresh one is the only
+  one there. What changed is logged per extension: `Widget: com.a.app.Widget → com.a.renamed.Widget`.
+
+### Fixed
+- **An untouched import is signed exactly as published.** Importing an `.ipa` used to copy its
+  identity into the configuration, which made every install "configured" — and applying that
+  renamed the app's extension to a new identifier, after which the signer failed with an empty
+  error. The build's name, bundle ID and versions are shown as greyed placeholders now and only
+  written when a field is typed into; the extension rename happens only for a real rename, and a
+  renamed extension's stale embedded profile is dropped rather than left beside the new one.
+- **The detection patch no longer contradicts the profile.** It leaves `get-task-allow` out instead
+  of writing it false: the value comes from the profile the signer issues, and disagreeing with it
+  fails signing. It also stays off for SideInstaller itself, whose own source holds the marker
+  strings it searches for.
+
+### Fixed
+- **Signing failed on a build that bundles the in-app-purchase patches.** The three `.dylib` files
+  were shipped as they are inside `IAPTweaks/`, which is unsigned nested code in a bundle codesign
+  has to sign — the signer refused with an empty error. They are stored base64-encoded now and
+  decoded into a temporary file when the switch is turned on, so nothing executable sits in
+  Resources.
+- **An adopted bundle ID no longer renames app extensions.** Importing a build writes its own
+  identifier into the configuration; applying that back renamed the extension to
+  `<id>.SideInstallerLiveActivity`, which no longer matched its profile. The rename now happens only
+  when the app itself was actually renamed.
+
+### Changed
+- **The Install tab is two cards now: what to install, and how.** **App selection** holds the build
+  dropdown and its version, the custom `.ipa` button with its file/link controls, bulk install, and
+  the one-line summary of the next run. **Configuration** holds everything else in two folds:
+  **IPA configuration** (identity, Info.plist and entitlements, capabilities, sideload-detection
+  bypass, pairing) and **Tweak configuration** (tweak storage and browser, injection path and folder,
+  the in-app-purchase switch, and the tweaks themselves). Each fold's header says how much of it is
+  set — `identity · 2 plist key(s) · bypass`, `3 tweak(s)` — so the card reads as configured without
+  being opened.
+
+### Changed
+- **The Install tab is laid out around the action.** The Install button is pinned to the bottom of
+  the tab — it no longer scrolls away, and the run's progress reads in place of it without moving
+  anything else. Above it, what blocks a run now comes first (an unsupported iOS, Wi-Fi, the tunnel),
+  then the build and its configuration, then only the cards that have something to say: the queue
+  when it has builds, the clipboard when it holds a link, the pairing file where one is required. A
+  one-line summary under the controls says what the next run will actually do — build and release,
+  changes, tweaks, detection bypass.
+
+### Added
+- **Sideload-detection bypass, applied automatically when a build looks like it checks.** Importing an
+  `.ipa` scans its executable for the usual tells — the Cydia path, `cydia://`/`sileo://`,
+  `/var/jb`, `frida`, `substrate`, `embedded.mobileprovision`, `get-task-allow` — and, if it finds
+  any, turns on the patch for that install. The patch writes `get-task-allow` false and empties those
+  strings in place (same length, same offsets, nothing moved). Signing configuration › **Sideload
+  detection** shows what was found and can switch it off; a build that attests through
+  `DeviceCheck`/`AppAttest` is called out, because that check runs on a server and no patch here can
+  answer it.
+- **Background keep-alive, with a page of its own under Tools.** Tools › **Background** turns on
+  either of the background modes this app declares: **silent audio** (a playback session looping
+  silence — the reliable one) or **location updates** (a low-accuracy session). It's remembered
+  across launches; audio resumes on its own, location only when it's already been allowed, so nobody
+  gets a permission prompt on opening the app. The page says what each costs and what iOS still
+  won't guarantee.
+- **Scan my whole Telegram.** The Telegram studio takes a full Telegram Desktop export (`result.json`
+  from Settings › Advanced › Export Telegram data, “include everything”) and lists every channel the
+  account is in, with how many `.ipa` files each carries; the ones with a public handle are ticked
+  already, and one button adds them all. Channels without a public handle are listed too, marked as
+  unreadable from here — that's the limit of reading without an account.
+- **A refresh button on the Install tab clears everything it was given.** Top right: it drops the
+  imported `.ipa` (and deletes its copy), any release picked, the build and channel back to
+  SideStore/stable, the signing configuration, the pasted link and the last run's state. Nothing a
+  previous attempt left behind can be carried into the next install by accident.
+- **Injection frameworks live in Tweak storage now.** The loader list — ElleKit, Substitute,
+  CydiaSubstrate, libhooker, with download / add-from-file / remove — moved out of the install
+  menu's tweak section into **Tools › Tweak storage**, beside the libraries they load. A loader is
+  part of the toolkit, not part of one build, so adding it once serves every install that needs it.
+- **The tweak section has path and folder selectors.** Two menus under **Tweaks** choose how an
+  injected library is named — `@executable_path` or `@rpath` — and where it's copied —
+  `/Frameworks/` or `/` — defaulting to `@executable_path` and `/Frameworks/`. Changing either
+  rewrites the load path of every tweak already added, so the list and the load commands stay in
+  step instead of drifting.
+- **Adding a tweak sets it up the way injection expects.** Every injected library is loaded from
+  `@executable_path/Frameworks/<library>` — the folder the build actually gets — and treated as
+  optional (`LC_LOAD_WEAK_DYLIB`) by default, for `.dylib` files and `.deb` packages alike; a
+  package's load path now names the library inside it rather than the package file. Adding a tweak
+  also fetches the injection framework it depends on when that framework is published (ElleKit,
+  Substitute); the closed ones still have to be added by hand.
+- **Downloads reads as a list of apps, compactly.** Each row shows the app's own name — read from the
+  `.ipa`'s `Info.plist`, so a file downloaded as `com.burbn.instagram.ipa` reads Instagram — with its
+  size and date on one line, and **Configure** and **Install** at the end of the row instead of a
+  second line of buttons. A search field sits at the top of the page, filtering by app name or file
+  name; share and delete moved into each row's menu.
+
+### Changed
+- **A marketplace download lands in the install menu instead of installing itself.** Both the row's
+  download button and the app page's primary button now fetch the release and hand it to the Install
+  tab as the custom build, so its name, capabilities and tweaks can be set before signing. The
+  install-all-updates path is unchanged; it still installs what it finds.
+- **Downloads: a library of the `.ipa` files on this iPhone.** The icon at the trailing end of the
+  marketplace's search bar opens it — everything downloaded or imported, with **Configure** (hand it
+  to the install menu) and **Install** (sign and install now) per file, share and delete.
+- **My Apps opens with the title above the search field.** The field was `.searchable`, which lives
+  in the navigation bar, so the header sat below it with a gap; it's a field in the page now, under
+  the header and directly above the list. Rows also fall back to the source's icon artwork when the
+  device's own icon hasn't been read yet, instead of showing a letter.
+- **Marketplace rows are all the same length.** The per-row version menu is always present (disabled
+  for a single release) instead of making rows with several releases wider than the rest.
+
+### Added
+- **Free in-app purchases, as one switch in the tweak section.** Signing configuration › Tweaks now
+  carries a **Free in-app purchases** toggle that adds the three bundled patches together:
+  **SatellaJailed** (hooks StoreKit's receipt and transaction checks with its own runtime),
+  **iOSGods iAPCracker** (drives `SKPaymentTransaction.transactionState` to purchased through
+  `MSHookMessageEx`) and **autoRevenuecat** (answers RevenueCat as if every entitlement is active).
+  The Logos tweak is marked as needing an injection framework — ElleKit/Substitute/Substrate/
+  libhooker, whichever is already here — and the panel offers to download ElleKit when none is.
+  Turning the switch off removes all three. The libraries are bundled in the app
+  (`IAPTweaks/`), so nothing has to be fetched.
+
+### Added
+- **Bulk install.** Under the custom `.ipa` button, **Bulk install** takes several files at once and
+  puts them in the install queue, one after another — the queue card on the Install tab shows each
+  one's state. A picker's file stops being readable when the picker closes, so each is copied into
+  the app's own staging folder first, and the copies are pruned once their item leaves the queue.
+- **The signing configuration is filled in from the build.** Picking an `.ipa` now reads its
+  `Info.plist` and entitlements (off the main actor) and seeds the panel: app name, bundle ID,
+  version and build, and the capability switches it already declares — document browser, background
+  audio and location, increased memory, Wi-Fi info. Only what the panel can express is taken; the
+  build's whole plist would be hundreds of keys, and its entitlements are re-issued by the profile.
+- **The configuration is cleared when a run ends**, successful or not: identity, plist and
+  entitlement edits, capabilities and the injected tweak copies. The next install starts from its
+  own build instead of inheriting the last app's name, entitlements and tweaks. Injectors stay (a
+  framework isn't part of one app), and Tweak storage keeps its own copies, so a set can be applied
+  again in one tap.
+
+### Added
+- **Tweak storage (Tools › Tweak storage).** A place for tweaks that aren't in a build yet: `.dylib`
+  files and `.deb` packages, kept in `Application Support/TweakLibrary`, plus **bundles** — named
+  sets of them — so "my setup" can be added to a build in one tap. Applying an item copies it into
+  the app configuration, the same path a picked file takes.
+
+### Changed
+- **My Apps is a list again.** The top of the page was a stack of page-wide buttons; now it opens on
+  the apps. **Updates** moved behind a download icon in the toolbar with the count beside it, and
+  the sheet it opens lists each newer release with the app's icon, its old and new version, and an
+  install button per row plus one for all of them. **Reload** is a toolbar icon (it becomes the way
+  to cancel a run), and **Refresh all** sits under the list with its caption, where it belongs after
+  you've seen what needs it. Icons now fill from the disk cache as soon as the page appears, so a
+  restored list doesn't sit on placeholder squares.
+- **The install menu is rebuilt around an advanced install.** The build presets are a dropdown with
+  the **version selector beside it**, the **custom `.ipa`** is a button of its own underneath, and
+  everything that shapes the signed build is in one expandable **Signing configuration**: app name
+  and bundle ID, Info.plist and entitlement editors, **capability switches** (document browser,
+  background audio and location, increased memory limit, Wi-Fi info), frameworks and dylibs
+  (with the tweak storage and the browser beside them), the tweaks already added — and the
+  **injection frameworks**, with ElleKit/Substitute downloadable and CydiaSubstrate/libhooker added
+  from a file, plus a warning naming whatever an added tweak needs.
+
+### Changed
+- **The action buttons are one size again.** The shared primary button dropped from a 52-point slab
+  (headline, 16pt of air, 18-point corners) to a 40-point row: `subheadline` semibold, 12 points of
+  padding, 14-point corners and a tighter glow — and with it every screen that uses it (Refresh all,
+  Load apps, Pair across iPhones, Sign in, and the rest). A new **secondary** style shares those
+  measurements, so a primary and secondary action side by side are the same height; the first place
+  that needed it was the "did you get it from sideinstaller.net" pair. The Install tab's own button
+  keeps its size, since it reshapes into the run's progress card rather than sitting in a row.
+
+### Changed
+- **Install, My Apps and Tools open with a compact header.** The big hero — an 86-point glyph over
+  a large title with the status pill under it — gave way to a single row: a 34-point glyph beside a
+  `title3` title, the status pill tucked under, about 70 points tall instead of 140. On the three
+  tabs that open with a list, that's a card's worth of content visible without scrolling. Every
+  other page keeps the hero it had.
+
+### Changed
+- **Settings is part of the Tools tab.** The gear in the top-right corner of every screen is gone;
+  the page it opened is the first card of **Tools** now, above the search field, and still opens as
+  a sheet with the same **Done**. Its sub-pages (Account, Tunnel, Renewals, Storage, Telegram,
+  Marketplace, Activity log) are reached from there. Pages that used to offer the gear — Install,
+  Marketplace, My Apps, Certificates, Entitlements, Pairing, Location, Side by Side, Install
+  history, Stored builds, Inspect .ipa, Injected libraries, Tweak browser, About — simply don't any
+  more; there is one way in, and it's on a page whose job is the app's own controls.
+
+### Fixed
+- **The Tools pages no longer do their heavy work while drawing.** Device info measured the app
+  container — a walk of every file in it, documents and caches included — inside a `body`, so the
+  page stalled for as long as the walk took and re-ran it on every redraw; Stored builds re-scanned
+  its folder for the header on each redraw; Install history checked for a file once per row per
+  redraw (two hundred file tests on a full list); Report a problem rebuilt the whole redacted log on
+  every keystroke in its description field. All of that is measured once — off the main actor, with
+  a visible "Measuring…" while it runs — and the Reports page's report is built once.
+- **Injected libraries reads an executable's head instead of the whole binary.** The page inflated
+  each stored build's executable in full (tens of megabytes apiece, up to a gigabyte for a big app)
+  to read load commands that live in the first few kilobytes. It now reads an 8 MB prefix, refuses
+  members over 64 MB compressed, and says "the executable couldn't be read" rather than claiming
+  the build links nothing.
+- **Long lists build lazily.** Entitlements (hundreds of App IDs on a paid team) and the tweak
+  browser's results are `LazyVStack`s now.
+- **Smaller ones:** the certificate expiry is parsed with shared ISO-8601 formatters instead of a
+  new one per call, the Tools hub formats that expiry once per change instead of once per redraw,
+  Settings › Storage measures its four folders off the main actor, and the About page's QR code is
+  rendered once, off the main actor.
+
+### Changed
+- **The Tools tab is grouped, searchable, and says what's in each page.** Thirteen pages now sit in
+  five sections — Device, Signing, Apps & builds, Sources & tweaks, Help — with a search field over
+  all of them, and each row carries its own status: the signing certificate's expiry (in orange when
+  it's close), how many builds are recorded, how much sits in Stored builds, how many sources and
+  repositories are configured, the app's version. **Marketplace sources**, **Report a problem** and
+  **About** are reachable from here now instead of only through Settings or a sheet inside another
+  page.
+
+### Changed
+- **The install menu is the whole setup, above the Install button.** The build is now four cards
+  (SideStore, SideStore + LiveContainer, Madeira, Custom .ipa) instead of a dropdown, and what the
+  install carries is a row of chips that say what they're set to: **Version** (the release, as a list
+  with room for a maintainer's warning), **Configuration** (how many changes the custom `.ipa` will
+  get), and **Pairing** (automatic, or the file you imported). The old collapsed **Advanced** section
+  under the button is gone; nothing an install needs is behind a disclosure any more.
+
+### Added
+- **Tweaks know what they are, and when there's a newer one.** A package added from a repository —
+  or a `.deb` picked in Files — now records its package identifier, version and where it came from.
+  The tweak list shows `1.4 · havoc.app`, and when a repository has a newer release its row offers
+  **Update to 1.6**: the build downloads and replaces the old one in place, keeping the "optional"
+  choice. The browser marks every package as new, up to date or updatable, and a package's page says
+  which version is installed before you tap.
+- **Adding a package replaces its earlier build** rather than loading two copies of one tweak. A
+  tweak added before this change has no version on record, so it's shown but never offered an
+  update it can't compare.
+
+### Added
+- **A tweak browser.** **App configuration › Tweaks & injectors › Browse** (also **Tools › Tweak
+  browser**) reads any Sileo/Cydia repository — Havoc and Chariz are there to start with — and adds a
+  package straight to the configuration: search by name, identifier, developer or section, tap a
+  package for its description and dependencies, and its `.deb` is downloaded once and handed to the
+  same path a picked file takes. Indexes are cached, so the page opens offline and says when a
+  refresh failed; a package's SHA-256 is checked against the index when it publishes one.
+
+### Added
+- **Quality-of-life pass:**
+  - **My Apps has a search field** (name, bundle ID or App ID) and a sort toggle between expiry and
+    name, so a device with forty sideloaded apps is navigable.
+  - **Haptics** where they belong: a success tap when a run finishes installing, a warning when it
+    stops, a firm tap when you confirm an uninstall — and none for background work.
+  - **Copy and share from the Info sheet**: copy the bundle ID in one tap, or copy/share a text
+    summary of the app (name, IDs, version, signer, expiry, and whether a stored `.ipa` exists) —
+    which is exactly what a bug report needs.
+  - **An .ipa opened from another app** (share sheet, "Open with") now imports *and* lands you on the
+    Install tab, where it's ready, instead of silently importing behind the current screen.
+
+### Changed
+- **Installs finish on their own.** The "this app needs an App ID" stop before signing is off by
+  default; the run logs what it registers and carries on to installation. Settings › Renewals ›
+  Installing turns the prompt back on for anyone who wants the confirmation.
+- **My Apps can update as well as re-sign.** Each app's menu is now *Update or reinstall*: from the
+  stored `.ipa`, straight to a newer release when a source carries one, or — always available — a
+  search of the marketplace for that bundle ID. A card above the list offers **Install all updates**
+  when several are waiting, one at a time so they share the device link politely.
+- **The marketplace knows what's installed.** An app's page shows the version on the device and says
+  when the release you're looking at is newer, so "should I update?" is answered before you tap.
+
+### Added
+- **Installed builds are kept, so they can be re-signed later.** Every `.ipa` SideInstaller installs
+  is copied into `Application Support/IPACache`, keyed by bundle ID — the signed bundle on the device
+  can't be pulled back, and the original download is often gone by the time the seven days run out.
+  The cache is part of the IPA library, so **My Apps › Re-sign** now works for anything installed
+  here. It prunes itself: copies older than sixty days, and the oldest once it passes 2 GB.
+- **Two more tools.** **Stored builds** lists what's cached — install it again, share it, or delete
+  the copy (the app stays installed). **Device** reads the model, iOS build, UDID, free/total storage
+  and the app container's size, with a button to re-read them from the device.
+
+### Added
+- **Renewals: re-signing apps before they expire.** Settings › Renewals switches on a background pass
+  (`BGAppRefreshTask`) that finds sideloaded apps whose profile expires within a configurable window
+  (6–72 hours, default 24), re-signs the ones whose `.ipa` is still on the device, and posts a
+  notification with the result. A background pass can't answer a 2FA prompt, so a sign-in that needs
+  a code stops the pass and says to open the app. There's a **Renew expiring apps now** button for
+  the same work on demand.
+
+### Fixed
+- **The source store mutated published state from whatever context called it.** Every method that
+  touches it is now main-actor bound.
+- **The local server rewrote the generated source on every request** — including each page load's
+  JSON fetch. It's cached for five seconds now.
+- **A deliberate refresh ignored its own `force` flag** and still sent `If-None-Match`; it now asks
+  for the body, so Refresh really refetches.
+- **Changing "show entries that open another app" in Settings had no effect** until the next source
+  revision. The marketplace observes it.
+- **A renewal pass signed in once per app**, inside the loop. It signs in once, before it.
+- **A scan blanked the results list while it ran**, and the renewals row did profile matching inside
+  a SwiftUI body. Both fixed.
+
+### Added
+- **Settings, properly.** New sections and screens, all driving real behaviour rather than
+  describing it:
+  - **Sources & storage › Telegram channels** — use the RSS bridge (off means preview-off channels
+    can't be read at all), scan on launch, every-page limit (5–100 pages), default depth for a new
+    channel, background refresh and the post-background grace period, local server auto-start, port
+    and live state.
+  - **Marketplace** — the order it opens with (name/newest/oldest/size, kept in sync with the menu),
+    and whether entries that only open another app (Telegram posts) are listed.
+  - **Storage** — each regenerable cache (source indexes, source documents, app icons, generated
+    sources) with its size and a way to clear it, and the total. Your .ipa library, pairing files and
+    certificates aren't in the list and can't be cleared from it.
+  - **Diagnostics** — exports a text file with the settings, storage report, source states, channels
+    and the last 300 log lines (no Apple ID, no passwords), and resets these settings without touching
+    accounts, certificates or sources.
+
+### Added
+- **App configuration is in Settings too.** A row there opens the same toolkit the Install screen does,
+  with the number of pending changes on it — identity, `Info.plist` keys, entitlements, extensions,
+  tweaks and injectors, import/export and reset.
+- **A tweak's load path is editable.** A library built for `@rpath`, or one that lives in a framework,
+  no longer has to sit at `@executable_path/Frameworks/<name>`.
+- **Check against the build.** One tap compares every key and entitlement you set with what the `.ipa`
+  actually contains and reports what changes, what's added, what's already true and what can't be a
+  plist value — before an install rather than after.
+
+### Changed
+- **Telegram channels scan every page by default.** The per-channel depth is now a switch —
+  *Scan every page*, on unless you turn it off — with a forty-page backstop (about eight hundred
+  posts) that stops early when a page brings nothing new.
+- **Icons everywhere.** Every Telegram entry carries a picture: the bridge's per-item preview image
+  when there is one, otherwise the channel's own icon (from the feed, or the preview page's
+  `og:image`). Channel rows in the studio show it too, instead of a generic glyph.
+- **The bridge feed is asked for more, and survives being busy.** `?limit=100` returns ~99 items
+  instead of ten; a 500 (it does that under load) is retried once and then falls back to the plain
+  feed, so a channel is never lost to a transient error.
+
+### Added
+- **A workaround for channels without web previews.** A public RSS bridge
+  (`tg.i-c-a.su`) republishes a channel with `<enclosure>` links to the files themselves, so those
+  channels now list *and download*. Measured: `blatants` 5 files, `binnichtaktivsipas` 5,
+  `iOS_Randy420` 1, `ipaomtk` 10 — all previously unreadable or post-only. The channel reader tries
+  the bridge and the preview and merges them: bridge links install directly, preview posts stay
+  current.
+- **A channel directory** replaces the free-text box: groups you can open, each channel with what it
+  carries and an Add button, plus the paste field for anything else.
+- **`/analyze` and `/analyze.json`** on the local server: the first renders every channel's apps as a
+  page a webview can load (app, version, size, and a link that either downloads or opens Telegram);
+  the second is the same as JSON.
+- **Background refreshes** via `BGAppRefreshTask`, plus a ~30-second `beginBackgroundTask` grace
+  period after backgrounding so a client can finish a fetch.
+
+### Note
+- **Silent audio and location keep-alive were not implemented.** Both are background-mode abuse —
+  they declare a purpose the app doesn't have, drain the battery, and are exactly what gets a
+  signing certificate pulled. The refresh + grace period is the honest ceiling iOS offers.
+
+### Added
+- **A local server for the Telegram source.** Sources › Telegram channels › **Local server** starts an
+  HTTP server bound to `127.0.0.1` only, serving `/telegram-source.json` (rebuilt on every request),
+  `/health` and a status page. That URL can be added as a source by anything on the same iPhone —
+  SideStore and AltStore included — so the generated list works as a live URL rather than a file.
+
+### Note
+- **An api_id/api_hash isn't a login.** It identifies an application to Telegram; reading *your*
+  joined channels needs an MTProto session for your account, which this build doesn't have. The
+  server serves what the studio can produce — public previews, imported exports, direct `.ipa` links
+  — and says so on its index page. iOS also stops the socket when the app leaves the foreground.
+
+### Added
+- **Telegram API credentials, set up in three steps.** Sources › Telegram channels ›
+  **Set up API credentials** links straight to my.telegram.org/apps, takes the api_id and api_hash
+  Telegram issues for an app, checks their shape, and keeps them in the Keychain. They're what any
+  Telegram client needs before it can log in.
+- **Import a channel export.** Telegram Desktop › a channel › ⋮ › Export chat history › JSON: pick
+  its `result.json` and every `.ipa` it lists joins the studio — and any file that came with the
+  export **installs straight from disk**, no account and no preview needed. That's the offline path
+  to a channel whose previews are off.
+
+### Note
+- **The login itself is still the MTProto client's job.** Credentials get a client to the door; the
+  session (code, 2FA, key on device) is a separate piece of work and the screen says so rather than
+  pretending the account is connected.
+
+### Added
+- **A Telegram studio** (Sources › Telegram channels): pick the channels to watch, set how far back to
+  scan (each preview page is about twenty posts), scan them, and turn the result into an
+  AltStore-format source at `Documents/Telegram/telegram-source.json` — loadable by the app through
+  a `file://` URL, or copyable as JSON to host anywhere for SideStore or AltStore.
+- **Deep channel scans.** The preview paginates with `?before=<oldest id>`, so a channel is read
+  several pages back instead of only its twenty most recent posts.
+
+### Note
+- **No Telegram login.** Reading a channel as your account needs an MTProto session — an api_id and
+  api_hash, a phone login with its code and 2FA, and a session key on the device. The studio says so
+  on its account card rather than offering a button that can't work; what ships reads public
+  previews, which is what the scan and the generated source are built on.
+
+### Added
+- **Telegram channels, the ones you asked for.** `ipaomtk` is listed with its app write-ups; `ipahub`
+  with its attachments; `binnichtaktivsipas`, `blatants` and `iOS_Randy420` say plainly that their
+  previews are off and offer **Open in Telegram** (`t.me/c/…` links are private and refused with a
+  reason). A post with no attachment but a title and a link — how catalogue channels post — is
+  listed as an app that opens its page.
+- **Telegram channels as sources.** Add `t.me/<channel>` under Sources and its `.ipa` posts appear in
+  the marketplace beside everything else, with the file's name, size and date. Telegram mints file
+  links per session, so its install button opens the post in Telegram — the only way to get the file
+  — while a post that links a direct `.ipa` installs normally like any other source. Only a public
+  channel's recent posts are readable; private channels have no preview.
+
+### Added
+- **Any repository format.** `SourceParser` reads AltStore / SideStore / AltStore PAL / SpotC,
+  GBox, Scarlet (both the store shape and its category map), and bare E-Sign / Feather-style
+  arrays, with aliases for the fields they name differently (`bundleID`, `down`, `icon`, `dev`,
+  `sourceImage`) and sizes written as text (`"12.4 MB"`). A source's apps no longer depend on it
+  being AltStore-shaped.
+
+### Changed
+- **Source scans are cached, so opening the app doesn't refresh anything.** Each source's parsed
+  rows are written to a small index file; the app reads those on launch (no network, no parsing)
+  and only refreshes a source that is missing or over six hours old. A refresh is conditional —
+  `If-None-Match` — so an unchanged repository costs a 304 with no body and no re-parse.
+
+### Fixed
+- **Sources whose apps disappeared now list them.** A source is read field by field instead of
+  through one typed schema: the v1 sources (CyPwn and friends) keep their only release at the app's
+  top level, and a single field of an unexpected type used to make the whole document unreadable —
+  209 apps in, nothing out. Verified against CyPwn (209/209), AppTesters (9,882/9,882), AltStore
+  (6/6) and Quark (8/8), and checked in CI by `source-parser`, which decodes live documents through
+  the app's own models and fails if an app is dropped.
+
+### Added
+- **A repository market, every entry checked.** 33 sources across six groups, each one fetched
+  during development and confirmed to return an AltStore-format document (or, for the six GitHub
+  rows, releases with `.ipa` assets): AltStore, SideStore, SideStore Team Picks, BatSign, App Fair,
+  Taurine; AltStore Complete, Quantum Source and ++, AppTesters, CyPwn; UTM, Provenance, iSH,
+  Flycast, Odyssey, Apollo, OatmealDome, Ignited; six community sources; and GitHub release feeds for
+  SideStore, LiveContainer, UTM, PPSSPP, Provenance and Delta. The dead entries (E-Sign's old
+  `appstore.json`, AppDB, iOS Haven) are gone — Sources now open with a curated list of popular repositories — big
+  catalogues (AppTesters, CyPwn, AppDB, iOS Haven), official ones (AltStore, E-Sign, FrizzleM's), and
+  GitHub release feeds (SideStore, LiveContainer, UTM, PPSSPP, Provenance, Delta) — each added in one
+  tap and labelled with the store it comes from.
+- **More than one kind of source.** The add sheet recognises AltStore-format JSON from any host, the
+  stores' own `altstore://` / `sidestore://` / `esign://` style links, plain website addresses, and
+  `github.com/owner/repo`, whose `.ipa` release assets are read as a source of their own.
+
+### Changed
+- **My Apps is split into TestFlight and sideloaded.** Sideloaded builds come first — they're the
+  ones that expire and need re-signing — with TestFlight below them. A TestFlight build's menu offers
+  Open, Info and Delete only: its provisioning is Apple's, so re-signing it here would replace a
+  working beta with the wrong kind of build.
+
+### Changed
+- **My Apps no longer parses on the main thread.** Even from cache, the tab decoded every
+  provisioning profile (a property list inside each CMS blob) and matched them to apps before its
+  first frame, then built every row eagerly. That work now runs in a detached task and the list is
+  lazy, so the tab draws and fills in rather than freezing.
+- **My Apps opens instantly.** It used to connect to the device as soon as the tab appeared — open
+  LocalDevVPN, wait for the tunnel, walk a pairing handshake — before showing a single app. The
+  inventory is now kept per device, so the page draws the last list immediately and says how old it
+  is. A re-read happens on its own only when the link is already open; **Load** and pull-to-refresh
+  still do the full read.
+
+### Changed
+- **The marketplace's controls live in one filter box.** The top bar is three things: **All apps**,
+  a **filter field**, and **Sources**. Typing in the field searches; its menu picks where to search
+  — every source, one source by name, a category, or featured — and how to order the result. The
+  sideways list of repositories and the bottom category bar are gone.
+- **Sources have a manager of their own** (the *Sources* chip opens it): several links pasted at
+  once or chosen from a text file, each source's app count, last fetch and any error, refresh one or
+  all, remove one (with what it costs), and export the list for another device.
+
+### Changed
+- **The marketplace is lighter and fetches faster.** A source is decoded once into the few fields a
+  row shows — name, developer, category, icon, releases — and the document itself (descriptions,
+  screenshots, news) is never kept, so a ten-thousand-app source costs a fraction of the memory it
+  did. Sources fetch in parallel, four at a time, and a refresh sends the cached `ETag` as
+  `If-None-Match`, so an unchanged source usually answers 304 and reads no body at all. Cached copies
+  are loaded first, so the list is browsable before the network answers.
+
+### Changed
+- **Menus load faster**, in three places that were doing far more work than the screen needed:
+  - *Marketplace* built its catalogue with a scan per release — quadratic, and a ten-thousand-app
+    repository stalled it. The release→source mapping is now indexed in the same pass, the rail's
+    counts are computed once instead of filtered per row, and the visible list is filtered and
+    sorted when the filter, the search field or the sort changes rather than on every layout pass.
+  - *My Apps* looked up each row's refresh job and its newest release by walking every source and
+    every installed app, per row, per pass. Both are indexed by bundle ID when the data changes.
+  - *App icons* are read from the disk cache first, then fetched over one `app_service` connection
+    per forty apps, instead of a fresh connection and handshake for every icon.
+
+### Added
+- **Launch with JIT.** My Apps can start an app under the device's debugger: the app is launched
+  suspended through DVT process control, the debugger attaches over RSD (which is what grants the
+  right to map executable memory), and the session is held open while the app runs — close it, or
+  leave SideInstaller, and JIT ends with it. The row and the Info sheet show the session, its
+  transcript, and the way to stop it.
+- **The marketplace sorts and merges.** One entry per app, with every release from every source
+  merged into it; the row's version menu — and the app's page — pick which release to install. The
+  list can be ordered by name, newest, oldest or size.
+
+### Fixed
+- **App configuration describes the build being installed, not SideInstaller.** It reads the
+  downloaded build, else the custom import, else the selected source's copy on disk, and says which
+  file it read. Values left over from the build it read before are replaced instead of pinned to
+  the wrong app.
+- **App icons in My Apps** come from the device (`app_service`), cached on disk, instead of being
+  a generic glyph.
+- **Re-sign works across teams**: an app installed by another Apple ID, or under a wildcard
+  certificate, is signed here and replaced in place, with a one-tap **Re-sign** on each row.
+
+### Fixed
+- **A source no longer shows an empty shelf.** The catalogue is de-duplicated by bundle ID so the
+  same app doesn't appear twice, but a source's view was filtering that de-duplicated list — so any
+  app another source also carried (with a newer release) vanished from this one's shelf. Sources
+  now have their own list, and a source that fails to load says why, in its shelf and with a mark in
+  the rail, instead of looking empty.
+
+### Changed
+- **The marketplace is compact**: single-column rows with the icon, name, developer, category and
+  newest version, and an install button on the row, instead of a grid of tall cards.
+- **My Apps is its own tab**, next to Install and Marketplace, and **About moved into Settings**.
+  Tools keeps Pairing, Certificates, Entitlements, Location, Inspect .ipa and Side by Side.
+- **App configuration starts from the build.** Opening it reads the imported `.ipa` and fills in the
+  identity, every top-level `Info.plist` key, the profile's entitlements and the extension bundles.
+  Tapping a key in the build adds it to the changes, prefilled.
+- **The `Info.plist` editor knows Apple's keys**: typing shows completions with what each key does,
+  the editor follows the key's type, and enumerated keys (orientations, device family, background
+  modes, privacy strings and so on) offer their documented values as pickers.
+- **Tweaks and injectors share one card.** A framework can be fetched where one is published —
+  ElleKit from its repository, Substitute from its GitHub release — or added from a copy; a tweak's
+  dependencies are read from the package's `Depends` and from the libraries it links, so the right
+  framework is loaded with it.
+
+### Changed
+- **The marketplace has its own tab**, beside Install and Tools, and its left menu is a rail of
+  buttons rather than a split view's list: a split view's selection doesn't push anything at
+  compact width, which is how an iPhone almost always shows it, so tapping a category did nothing.
+  The rail works at every width, shows how many apps each category and source has, and keeps the
+  search field across all of them.
+
+### Added
+- **Tweaks can be `.deb` packages.** A package is unpacked (ar → gzip → tar), its `DEBIAN/control`
+  read for its name, version and dependencies, and only the libraries it installs are taken — a
+  rootful or rootless package works, because the layout inside doesn't matter. Filters and
+  preference bundles are ignored.
+- **Injector frameworks.** ElleKit, CydiaSubstrate, libhooker and Substitute are added from a copy
+  the user has (they can't be redistributed here), under App configuration › Injectors. A
+  package's `Depends` decides which one is loaded, and it's injected ahead of the tweak. A tweak
+  whose injector is missing says so before the install runs.
+- **A full IPA configuration toolkit** in Install › Advanced: identity fields filled in from the
+  imported build, arbitrary `Info.plist` keys (text, switch, number, list), entitlements written
+  into the app's archived entitlements file, per-extension switches plus remove-all, Watch app
+  removal, tweaks, and export/import of the whole configuration as JSON.
+- **An app manager** on Tools › Sideloaded apps: per-app **Re-sign** (restarts its seven days),
+  **Update to <version>** when a configured source carries a newer release, and **Uninstall**
+  through `installation_proxy`.
+- **A marketplace** on Tools › Marketplace: a left menu of categories (the same ones an AltStore
+  source files apps under) and sources, with an App Store-style grid, search across every source,
+  one-tap install, and each app's own page behind it.
+
+### Changed
+- **A big source no longer freezes the browser.** The app list is built lazily, so only the rows
+  on screen exist; each source's apps are sorted once when it loads instead of on every redraw;
+  icons come from a small in-memory cache instead of being re-fetched and re-decoded per row; the
+  JSON is decoded off the main thread, both when a source is fetched and when its cached copy is
+  read at launch. The entrance cascade is capped as well — it used to delay each row by another
+  55 ms, so the four-hundredth app in a source stayed invisible for twenty seconds.
+- **Importing another .ipa starts the Install screen over.** A new import clears the last run's
+  error, its finished card, its progress and its steps, closes the link field and the Advanced
+  section, and selects the custom build — the menu is for the app that's about to be installed,
+  not the one before it.
+
+### Added
+- **App configuration for the custom .ipa**, in Install › Advanced. Before signing, SideInstaller
+  can give the build a new bundle ID (with its extensions re-prefixed to match), a new display
+  name, version and build number; remove its app extensions or its Watch app; and inject tweaks.
+  A tweak is a `.dylib` copied into the app's `Frameworks` folder and loaded by its main
+  executable through an added `LC_LOAD_DYLIB` (or `LC_LOAD_WEAK_DYLIB`), the same mechanism a
+  jailbreak tweak uses. The archive is rewritten in place — every file the change doesn't touch is
+  copied as its original compressed bytes — and applying the same configuration twice changes
+  nothing the second time.
+- **A patcher self-test in CI** (`patch-selftest`): builds a small arm64 `.ipa`, applies a rename
+  and an injection through `IPAPatch`, and checks the result with `unzip -t`, `plutil` and
+  `otool -l`, including that an untouched resource is still byte-identical and that a second pass
+  injects nothing.
+
+### Added
+- **Sources: browse an AltStore source and install from it.** Tools › Sources takes any
+  AltStore-format source link (AltStore's own is suggested) and lists the apps it carries, with
+  screenshots and every release the source publishes. Picking one downloads it and installs it
+  with the same run as any other build — signed with your Apple ID, no SideStore needed for the
+  first install. Sources are cached, so the list opens without a network, and a source that fails
+  to refresh says so without losing its last good copy. `sideinstaller://source?url=…` adds one
+  from a link.
+- **Inspect .ipa: read a build before signing it.** Tools › Inspect .ipa reads an archive in
+  place — no unpacking — and reports the bundle ID, version and build, size, file count and
+  SHA-256; the minimum iOS from both the plist and the executable's own Mach-O header, supported
+  platforms and devices, every architecture, and whether the code is still FairPlay-encrypted;
+  the embedded profile and its expiry; and every extension inside. Problems are listed as
+  blockers or warnings: an encrypted App Store build, a build that needs a newer iOS, no arm64
+  slice, a missing bundle ID, an extension with no profile of its own.
+- **A downloaded build is now checked before it's signed.** A link or a source that delivers an
+  encrypted App Store copy, a build for a newer iOS, or an archive with no arm64 code is stopped
+  with the reason, instead of registering an App ID for something that can't run.
 ## 2.2.0
 
 ### Added

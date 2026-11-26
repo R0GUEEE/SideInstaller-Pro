@@ -1,0 +1,191 @@
+name: patch-selftest
+
+# Exercises IPAPatch against a real archive on a macOS runner: builds a small
+# arm64 .ipa, applies a rename plus a tweak injection through the same code the
+# app uses, then checks the result with the system's own tools (unzip, plutil,
+# otool). The app's build only proves the code compiles; this proves it rewrites
+# an archive correctly.
+
+on:
+  push:
+    paths:
+      - "ios-app/IPAPatch.swift"
+      - "ios-app/AppConfig.swift"
+      - "tools/patch-selftest/**"
+      - ".github/workflows/patch-selftest.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: Patch a sample .ipa
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the harness
+        run: |
+          swiftc -O ios-app/IPAPatch.swift ios-app/AppConfig.swift ios-app/DebArchive.swift \
+            ios-app/InjectorCatalog.swift ios-app/MachO.swift ios-app/SideloadPatch.swift ios-app/PlistCatalog.swift \
+            tools/patch-selftest/main.swift \
+            -o "$RUNNER_TEMP/patch-selftest"
+
+      - name: Build a sample .ipa and a tweak
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          WORK="$RUNNER_TEMP/sample"
+          APP="$WORK/root/Payload/Test.app"
+          mkdir -p "$APP/PlugIns/Widget.appex" "$APP/Watch/WatchApp.app" "$WORK/root/Payload/Test.app/Frameworks"
+
+          cat > "$WORK/main.c" <<'C'
+          int main(void) { return 0; }
+          C
+          xcrun -sdk iphoneos clang -target arm64-apple-ios17.4.0 -isysroot "$SDK" \
+            -o "$APP/Test" "$WORK/main.c"
+          xcrun -sdk iphoneos clang -target arm64-apple-ios17.4.0 -isysroot "$SDK" \
+            -dynamiclib -o "$WORK/TestTweak.dylib" "$WORK/main.c"
+
+          cat > "$APP/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key><string>Test</string>
+            <key>CFBundleIdentifier</key><string>com.example.test</string>
+            <key>CFBundleName</key><string>Test</string>
+            <key>CFBundleShortVersionString</key><string>1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>MinimumOSVersion</key><string>17.4</string>
+            <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+            <key>UIDeviceFamily</key><array><integer>1</integer></array>
+          </dict></plist>
+          PLIST
+
+          sed 's#com.example.test#com.example.test.widget#' "$APP/Info.plist" \
+            > "$APP/PlugIns/Widget.appex/Info.plist"
+          sed 's#com.example.test#com.example.test.watchapp#' "$APP/Info.plist" \
+            > "$APP/Watch/WatchApp.app/Info.plist"
+          mkdir -p "$APP/Watch/WatchApp.app/Watch"
+          echo "a resource that must survive patching" > "$APP/Resource.txt"
+          # An empty member. Rebuilding the archive used to fail at the first one
+          # with "the archive is damaged around <path>", because copying a
+          # zero-length member asked FileHandle for zero bytes and treated the
+          # (empty) answer as a read failure. A bundled Python stdlib is full of
+          # these, so a real .ipa hit it immediately.
+          mkdir -p "$APP/python/lib/python3.13/test"
+          : > "$APP/python/lib/python3.13/test/__init__.py"
+
+          cd "$WORK/root"
+          zip -qry "$WORK/Test.ipa" Payload
+          cp "$WORK/Test.ipa" "$WORK/Original.ipa"
+
+          # A .deb carrying the tweak, built by hand: an ar archive around
+          # control.tar.gz and data.tar.gz, as dpkg makes it.
+          python3 - "$WORK" <<'PY'
+          import io, os, sys, tarfile, gzip
+          work = sys.argv[1]
+          def tar_gz(entries):
+              raw = io.BytesIO()
+              with tarfile.open(fileobj=raw, mode='w') as tar:
+                  for name, data in entries:
+                      info = tarfile.TarInfo(name)
+                      info.size = len(data)
+                      info.mode = 0o644
+                      tar.addfile(info, io.BytesIO(data))
+              return gzip.compress(raw.getvalue(), mtime=0)
+          control = tar_gz([("./control",
+              b"Package: com.example.testtweak\nName: Test Tweak\nVersion: 1.2.3\n"
+              b"Architecture: iphoneos-arm64\nDepends: mobilesubstrate (>= 0.9.5000), firmware (>= 15.0)\n"
+              b"Description: injected by the self-test\n")])
+          library = open(os.path.join(work, "TestTweak.dylib"), "rb").read()
+          data = tar_gz([("./Library/MobileSubstrate/DynamicLibraries/TestTweak.dylib", library),
+                         ("./Library/MobileSubstrate/DynamicLibraries/TestTweak.plist",
+                          b"{ Filter = { Bundles = ( \"com.example.test\" ); }; }\n")])
+          def member(name, payload):
+              header = ("%-16s%-12s%-6s%-6s%-8s%-10s`\n" % (name, "0", "0", "0", "100644", len(payload))).encode()
+              assert len(header) == 60
+              return header + payload + (b"\n" if len(payload) % 2 else b"")
+          with open(os.path.join(work, "TestTweak.deb"), "wb") as out:
+              out.write(b"!<arch>\n")
+              out.write(member("debian-binary/", b"2.0\n"))
+              out.write(member("control.tar.gz/", control))
+              out.write(member("data.tar.gz/", data))
+          print("deb written")
+          PY
+
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+
+      - name: Apply the configuration
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/patch-selftest" "$WORK/Test.ipa" "$WORK/TestTweak.dylib" "$WORK/TestTweak.deb"
+
+      - name: Check the .deb was read
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/patch-selftest" "$WORK/Test.ipa" "$WORK/TestTweak.dylib" "$WORK/TestTweak.deb" \
+            | grep '^DEB' | tee /tmp/deb.txt
+          grep -q 'DEB PACKAGE: com.example.testtweak/Test Tweak/1.2.3/iphoneos-arm64' /tmp/deb.txt
+          grep -q 'DEB INJECTOR: substrate' /tmp/deb.txt
+          grep -q 'DEB LIB: Library/MobileSubstrate/DynamicLibraries/TestTweak.dylib -> TestTweak.dylib' /tmp/deb.txt
+
+      - name: Check the rebuilt archive
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          echo "::group::zip integrity"
+          unzip -tq Test.ipa
+          echo "::endgroup::"
+          echo "::group::zero-byte member"
+          rm -rf "$WORK/zero" && mkdir -p "$WORK/zero"
+          unzip -q -o Test.ipa '*python/lib/python3.13/test/__init__.py' -d "$WORK/zero"
+          EMPTY=$(find "$WORK/zero" -type f -name __init__.py | head -1)
+          # The bundle directory may be renamed by the patch, so match on the tail
+          # of the path rather than the app's name.
+          test -n "$EMPTY" || { echo "::error::the zero-byte member did not survive the rewrite"; exit 1; }
+          test ! -s "$EMPTY" || { echo "::error::the zero-byte member came back with content"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::contents"
+          unzip -l Test.ipa
+          echo "::endgroup::"
+
+          rm -rf out && mkdir out && unzip -q Test.ipa -d out
+          APP="out/Payload/Test.app"
+
+          echo "::group::Info.plist"
+          plutil -p "$APP/Info.plist"
+          test "$(plutil -extract CFBundleIdentifier raw "$APP/Info.plist")" = "com.example.renamed"
+          test "$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist")" = "Renamed App"
+          test "$(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")" = "9.9"
+          test "$(plutil -extract CFBundleVersion raw "$APP/Info.plist")" = "42"
+          echo "::endgroup::"
+
+          echo "::group::extension renamed, watch app removed"
+          # The extension keeps the name it carried in its identifier
+          # (test.widget), not the folder's (Widget): a rename changes the app,
+          # not the extension.
+          test "$(plutil -extract CFBundleIdentifier raw "$APP/PlugIns/Widget.appex/Info.plist")" = "com.example.renamed.widget"
+          test ! -d "$APP/Watch/WatchApp.app"
+          echo "::endgroup::"
+
+          echo "::group::tweak"
+          test -f "$APP/Frameworks/TestTweak.dylib"
+          otool -l "$APP/Test" | grep -A2 LC_LOAD_DYLIB
+          otool -l "$APP/Test" | grep -q "@executable_path/Frameworks/TestTweak.dylib"
+          # The header still has to describe exactly the commands that follow.
+          otool -h "$APP/Test"
+          echo "::endgroup::"
+
+          echo "::group::untouched members are byte-identical"
+          # A resource the configuration doesn't mention has to come through
+          # exactly, compressed bytes and all.
+          unzip -p Original.ipa Payload/Test.app/Resource.txt > /tmp/before.txt
+          unzip -p Test.ipa Payload/Test.app/Resource.txt > /tmp/after.txt
+          cmp /tmp/before.txt /tmp/after.txt
+          echo "Resource.txt identical"
+          echo "::endgroup::"

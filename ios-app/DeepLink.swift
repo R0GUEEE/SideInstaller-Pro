@@ -14,6 +14,10 @@ enum DeepLink: Hashable {
     /// a signing certificate and its private key to sign with. SideStore sends
     /// its own when asked with `sidestore://certificate?callback_template=`.
     case certificate(LinkedCertificate)
+    /// `sideinstaller://source?url=<link to an AltStore source>`: a source to
+    /// add to the Sources page, as an `altstore://source?url=` link is to
+    /// AltStore.
+    case source(URL)
 
     /// The scheme registered in Info.plist.
     static let scheme = "sideinstaller"
@@ -73,6 +77,12 @@ enum DeepLink: Hashable {
             return .link(.pairingFile(LinkedPairingFile(data: data, kind: kind,
                                                         fromSideStore: answersSideStore)))
 
+        case "source":
+            guard let raw = query["url"], let link = SourceStore.sourceURL(from: raw) else {
+                return .invalid(L("That link was meant to carry a source, but its url= isn't a link to one."))
+            }
+            return .link(.source(link))
+
         case "certificate":
             guard let raw = query["data"], let data = decodeBase64(raw),
                   LinkedCertificate.isPlausibleArchive(data)
@@ -112,6 +122,8 @@ enum DeepLink: Hashable {
             return "pairing file\(file.fromSideStore ? " from SideStore" : "") (\(file.data.count) bytes, \(records))"
         case .certificate(let cert):
             return "signing certificate\(cert.fromSideStore ? " from SideStore" : "") (\(cert.data.count) bytes)"
+        case .source(let url):
+            return "source \(url.host ?? url.absoluteString)"
         }
     }
 }

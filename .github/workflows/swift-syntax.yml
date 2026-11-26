@@ -1,0 +1,41 @@
+name: swift-syntax
+
+# Parses every Swift source in ios-app with `swiftc -parse`: a syntax check
+# only (no modules, no SDK, so imports and types aren't resolved). It answers in
+# a couple of minutes what the full release build takes an hour to say, which
+# makes it the right first gate for a branch that touches a lot of files.
+#
+# The real check is release-sideinstaller.yml on a dry run.
+
+on:
+  push:
+    paths:
+      - "ios-app/**.swift"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    name: Parse sources
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: swiftc -parse
+        shell: bash
+        run: |
+          set -uo pipefail
+          fail=0
+          shopt -s nullglob
+          for file in ios-app/*.swift ios-live-activity/*.swift; do
+            if ! out=$(xcrun swiftc -parse "$file" 2>&1); then
+              echo "::error file=$file::syntax error"
+              echo "--- $file"
+              echo "$out"
+              fail=1
+            fi
+          done
+          exit $fail

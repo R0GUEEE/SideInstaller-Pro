@@ -152,7 +152,7 @@ enum Shortcuts {
 // MARK: - Siri and Spotlight
 
 /// The actions Siri and Spotlight offer without a shortcut being made first.
-struct SideInstallerShortcuts: AppShortcutsProvider {
+struct SideInstallerProShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: SetSavedPlaceIntent(),
                     phrases: ["Spoof my location to \(\.$place) with \(.applicationName)",

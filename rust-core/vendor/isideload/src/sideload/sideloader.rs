@@ -1,7 +1,7 @@
 use crate::{
     dev::{
         app_groups::AppGroupsApi,
-        app_ids::AppIdsApi,
+        app_ids::{AppIdVerification, AppIdsApi},
         developer_session::DeveloperSession,
         devices::DevicesApi,
         teams::{DeveloperTeam, TeamsApi},
@@ -13,60 +13,15 @@ use crate::{
         cert_identity::CertificateIdentity,
         sign,
     },
-    util::storage::SideloadingStorage,
+    util::{device::IdeviceInfo, storage::SideloadingStorage},
 };
-#[cfg(feature = "install")]
-use crate::util::device::IdeviceInfo;
 
 use std::path::PathBuf;
 
 use futures_util::future::{try_join, try_join3, try_join_all};
-#[cfg(feature = "install")]
 use idevice::provider::IdeviceProvider;
 use rootcause::{option_ext::OptionExt, prelude::*};
 use tracing::{info, warn};
-
-/// Whether [`Sideloader::sign_app`] enables the Increased Memory Limit
-/// capability on the app's App IDs before the profile is requested. The
-/// profile then grants `com.apple.developer.kernel.increased-memory-limit`, and
-/// the app is signed with it, which raises the memory iOS lets it use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoryLimit {
-    /// Leave the App IDs as they are.
-    Off,
-    /// Enable it, and fail if Apple refuses: the app needs it (Madeira).
-    Required,
-    /// Enable it unless the app is an app store that refreshes itself (see
-    /// `renews_own_app_id`); if Apple refuses, sign without it.
-    Preferred,
-}
-
-impl MemoryLimit {
-    /// The mode to use for an app that is `special`.
-    fn for_app(self, special: Option<&SpecialApp>) -> MemoryLimit {
-        match (self, special) {
-            (MemoryLimit::Preferred, Some(app)) if renews_own_app_id(app) => MemoryLimit::Off,
-            (limit, _) => limit,
-        }
-    }
-}
-
-/// Whether `app` is an app store that refreshes itself. Once Apple expires its
-/// App ID (7 days after it was registered, on a free team), it registers a new
-/// one and refreshes by installing that App ID's profiles, without signing
-/// itself again. LiveContainer on its own is refreshed by whatever installed it.
-///
-/// SideStore doesn't enable Increased Memory Limit on the App ID it registers
-/// for a free team: SideSign's `Feature.freeFeatures` is App Groups and
-/// Inter-App Audio only (SideStore issue #1616; the fix, SideSign PR #4, was
-/// still unmerged on 2026-10-28, and SideStore's `develop` pins SideSign
-/// 752d1ef). A SideStore signed with the entitlement, or a LiveContainer it
-/// lives in, would then get profiles that grant less than its signature claims.
-/// AltStore enables it again (AltSign b2c8861), and StikStore wasn't checked;
-/// none of them needs the memory, so all four are left alone.
-fn renews_own_app_id(app: &SpecialApp) -> bool {
-    !matches!(app, SpecialApp::LiveContainer)
-}
 
 pub struct Sideloader {
     team_selection: TeamSelection,
@@ -76,8 +31,6 @@ pub struct Sideloader {
     apple_email: String,
     max_certs_behavior: MaxCertsBehavior,
     //extensions_behavior: ExtensionsBehavior,
-    // Only `install_app` reads it.
-    #[cfg_attr(not(feature = "install"), allow(dead_code))]
     delete_app_after_install: bool,
     team: Option<DeveloperTeam>,
 }
@@ -111,8 +64,6 @@ impl Sideloader {
 
     /// Sign the app at the provided path and return the path to the signed app bundle (in a temp dir). To sign and install, see [`Self::install_app`].
     ///
-    /// `memory_limit` says whether the App IDs get Increased Memory Limit
-    /// first (see [`MemoryLimit`]).
     /// `register_device` is a device's (name, UDID) to register with the team
     /// first, since the provisioning profile only covers registered devices.
     /// `pairing_file` is that device's RPPairing record, which goes encrypted
@@ -125,7 +76,8 @@ impl Sideloader {
         &mut self,
         app_path: PathBuf,
         team: Option<DeveloperTeam>,
-        memory_limit: MemoryLimit,
+        // this will be replaced with proper entitlement handling later
+        increased_memory_limit: bool,
         app_group: bool,
         register_device: Option<(&str, &str)>,
         pairing_file: Option<&[u8]>,
@@ -180,13 +132,6 @@ impl Sideloader {
                 .await
                 .map_err(|e| report!("Failed to open application archive: {e}"))??;
             let special = app.get_special_app();
-            let wanted_memory_limit = memory_limit;
-            let memory_limit = wanted_memory_limit.for_app(special.as_ref());
-            if memory_limit != wanted_memory_limit
-                && let Some(special) = &special
-            {
-                info!("Leaving Increased Memory Limit off: {special} renews its own App ID");
-            }
 
             let main_bundle_id = app.main_bundle_id()?;
             let main_app_name = app.main_app_name()?;
@@ -202,10 +147,20 @@ impl Sideloader {
                 }
             );
 
+            // A wildcard profile (`TEAM.*`) already covers any identifier on
+            // the team, so a team made of them needs no App ID per extension.
+            let wildcard_covers_all = team_uses_wildcard_profiles(&mut app_id_session, &team).await;
+            if wildcard_covers_all && app_group {
+                warn!(
+                    "This team's profiles are wildcard ones, so an app group is not granted and \
+                     the app is signed without one"
+                );
+            }
+
             let (mut app_ids, app_group) = try_join(
-                app.register_app_ids(&mut app_id_session, &team),
+                app.register_app_ids(&mut app_id_session, &team, wildcard_covers_all),
                 async {
-                    if !app_group {
+                    if !app_group || wildcard_covers_all {
                         return Ok(None);
                     }
                     group_session
@@ -219,13 +174,16 @@ impl Sideloader {
             let main_app_id = app_ids
                 .iter()
                 .find(|app_id| app_id.identifier == main_app_id_str)
-                .cloned()
-                .ok_or_else(|| {
-                    report!(
-                        "Main app ID {} not found in registered app IDs",
-                        main_app_id_str
-                    )
-                })?;
+            .cloned()
+            .ok_or_else(|| {
+                report!(
+                    "Main app ID {} not found in registered app IDs",
+                    main_app_id_str
+                )
+            })?;
+            // A wildcard team's main App ID is not among the team's App IDs (it
+            // may not exist at all); the profile lookup below only needs an
+            // identifier, and the profile will be the wildcard one.
 
             // Each App ID is configured on its own session, all at once.
             try_join_all(app_ids.iter_mut().map(|app_id| {
@@ -237,18 +195,21 @@ impl Sideloader {
                         session
                             .assign_app_group(team, app_group, app_id, None)
                             .await?;
+                        // The profile is built from the App ID as Apple now
+                        // holds it. Reading it back is what catches a PATCH
+                        // Apple accepted without applying: the profile would
+                        // then lack `application-groups` while the signature
+                        // followed the profile, and the app would be installed
+                        // with a shared container it cannot open.
+                        session
+                            .require_app_group_feature(team, app_id, app_group.identifier.as_str())
+                            .await?;
                     }
-                    if memory_limit != MemoryLimit::Off {
-                        match session.add_increased_memory_limit(team, app_id).await {
-                            Ok(()) => {
-                                info!("Increased Memory Limit enabled for {}", app_id.identifier)
-                            }
-                            Err(e) if memory_limit == MemoryLimit::Preferred => warn!(
-                                "Couldn't enable Increased Memory Limit for {}, signing without it: {e}",
-                                app_id.identifier
-                            ),
-                            Err(e) => return Err(e),
-                        }
+                    if increased_memory_limit {
+                        session.add_increased_memory_limit(team, app_id).await?;
+                        session
+                            .require_capability(team, app_id, "increasedMemoryLimit")
+                            .await?;
                     }
                     Ok::<(), Report>(())
                 }
@@ -256,16 +217,27 @@ impl Sideloader {
             .await?;
 
             info!("App IDs configured");
-            Ok::<_, Report>((app, special, group_identifier, main_app_id))
+            Ok::<_, Report>((app, special, group_identifier, main_app_id, app_ids))
         };
 
-        let ((), cert_identity, (mut app, special, group_identifier, main_app_id)) =
+        let ((), cert_identity, (mut app, special, group_identifier, main_app_id, app_ids)) =
             try_join3(registration, certificate, bundle).await?;
+
 
         // The profile has to come after the device and App IDs are set up; the
         // certificate goes into the bundle meanwhile.
+        //
+        // The extensions' identifiers are read here, before both branches
+        // borrow: one mutates the bundle, the other only needs the list.
+        let extension_ids: Vec<String> = app
+            .bundle
+            .collect_nested_bundles()
+            .iter()
+            .filter(|b| b.bundle_dir.extension().and_then(|e| e.to_str()) == Some("appex"))
+            .filter_map(|b| b.bundle_identifier().map(str::to_string))
+            .collect();
         let dev_session = &mut self.dev_session;
-        let ((), provisioning_profile) = try_join(
+        let ((), profiles) = try_join(
             async {
                 app.apply_special_app_behavior(
                     &special,
@@ -279,11 +251,37 @@ impl Sideloader {
                 Ok::<(), Report>(())
             },
             async {
-                let profile = dev_session
-                    .download_team_provisioning_profile(&team, &main_app_id, None)
-                    .await?;
-                info!("Acquired provisioning profile");
-                Ok::<_, Report>(profile)
+                let mut profiles = std::collections::HashMap::new();
+                let mut unsigned: Vec<String> = Vec::new();
+                for app_id in &app_ids {
+                    let profile = dev_session
+                        .download_team_provisioning_profile(&team, app_id, None)
+                        .await?;
+                    profiles.insert(app_id.identifier.clone(), profile);
+                }
+                // Every App ID is kept on the team, signed or not, so the list
+                // of profiles and the list of App IDs stay in step. A wildcard
+                // team lists App IDs created by other installs; those get no
+                // request, and no extension will be looking one up.
+                let wanted: std::collections::HashSet<&str> = app_ids
+                    .iter()
+                    .map(|app_id| app_id.identifier.as_str())
+                    .collect();
+                for id in extension_ids {
+                    if !wanted.contains(id.as_str()) && !unsigned.contains(&id) {
+                        unsigned.push(id);
+                    }
+                }
+                if !unsigned.is_empty() {
+                    warn!(
+                        "{} app extension(s) have no App ID of their own and are signed with the \
+                         empty entitlement set: {}",
+                        unsigned.len(),
+                        unsigned.join(", ")
+                    );
+                }
+                info!("Acquired {} provisioning profiles", profiles.len());
+                Ok::<_, Report>(profiles)
             },
         )
         .await?;
@@ -300,10 +298,13 @@ impl Sideloader {
         // as it signs them, since the profile is sealed into CodeResources.
         // Hosts read an extension's copy back: AltStore-family apps reject an
         // extension without one.
+        let provisioning_profile = profiles.get(&main_app_id.identifier)
+            .ok_or_else(|| report!("Missing main app provisioning profile"))?;
         sign::sign(
             &mut app,
             &cert_identity,
-            &provisioning_profile,
+            provisioning_profile,
+            &profiles,
             &special,
             &team,
         )
@@ -315,13 +316,14 @@ impl Sideloader {
     }
 
     #[cfg(feature = "install")]
-    /// Sign and install an app to a device. `memory_limit` and `pairing_file`
-    /// are as for [`Self::sign_app`].
+    /// Sign and install an app to a device. `pairing_file` is as for
+    /// [`Self::sign_app`].
     pub async fn install_app(
         &mut self,
         device_provider: &impl IdeviceProvider,
         app_path: PathBuf,
-        memory_limit: MemoryLimit,
+        // this is gross but will be replaced with proper entitlement handling later
+        increased_memory_limit: bool,
         pairing_file: Option<&[u8]>,
     ) -> Result<Option<SpecialApp>, Report> {
         let device_info = IdeviceInfo::from_device(device_provider).await?;
@@ -331,7 +333,7 @@ impl Sideloader {
             .sign_app(
                 app_path,
                 Some(team),
-                memory_limit,
+                increased_memory_limit,
                 true,
                 Some((&device_info.name, &device_info.udid)),
                 pairing_file,
@@ -406,28 +408,77 @@ impl Sideloader {
     }
 }
 
+/// Whether every provisioning profile the team currently holds is a wildcard
+/// one (`TEAM.*`).
+///
+/// A wildcard profile covers every identifier on the team, so no App ID has to
+/// be registered for an app or its extensions, and no capability can be granted
+/// on an App ID. Asking for the team's profiles and reading what came back is
+/// the only place the answer exists. An answer that can't be read counts as
+/// "no": the App IDs are then registered the ordinary way, and the profiles
+/// Apple issues are whatever they are.
+async fn team_uses_wildcard_profiles(dev_session: &mut DeveloperSession, team: &DeveloperTeam) -> bool {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Entry {
+        #[serde(default)]
+        provisioning_profile_id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+        #[serde(default)]
+        app_id_id: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listing {
+        #[serde(default)]
+        provisioning_profiles: Vec<Entry>,
+    }
+
+    let body = plist_macro::plist!(dict { "teamId": &team.team_id });
+    let url = crate::dev::device_type::dev_url("listProvisioningProfiles", None);
+    let listed: Result<Listing, _> = dev_session
+        .send_dev_request(&url, body, "provisioningProfileList")
+        .await;
+    let Ok(listing) = listed else {
+        return false;
+    };
+    if listing.provisioning_profiles.is_empty() {
+        return false;
+    }
+    listing
+        .provisioning_profiles
+        .iter()
+        .all(|entry| is_wildcard_profile(entry.kind.as_deref(), entry.name.as_deref()))
+}
+
+fn is_wildcard_profile(kind: Option<&str>, name: Option<&str>) -> bool {
+    if let Some(kind) = kind
+        && kind.to_ascii_uppercase().contains("WILDCARD")
+    {
+        return true;
+    }
+    name.map(|name| name.contains(".*")).unwrap_or(false)
+}
+
 #[cfg(test)]
-mod tests {
-    use super::{MemoryLimit, SpecialApp};
+mod wildcard_tests {
+    use super::is_wildcard_profile;
 
     #[test]
-    fn memory_limit_leaves_out_the_app_stores_that_refresh_themselves() {
-        use MemoryLimit::{Off, Preferred, Required};
-        let stores = [
-            SpecialApp::SideStore,
-            SpecialApp::SideStoreLc,
-            SpecialApp::AltStore,
-            SpecialApp::StikStore,
-        ];
-        for store in &stores {
-            assert_eq!(Preferred.for_app(Some(store)), Off, "{store}");
-            // An app that needs it gets it, whatever it is.
-            assert_eq!(Required.for_app(Some(store)), Required, "{store}");
-            assert_eq!(Off.for_app(Some(store)), Off, "{store}");
-        }
-        assert_eq!(Preferred.for_app(Some(&SpecialApp::LiveContainer)), Preferred);
-        for limit in [Off, Required, Preferred] {
-            assert_eq!(limit.for_app(None), limit);
-        }
+    fn a_dev_profile_named_for_the_team_is_a_wildcard() {
+        assert!(is_wildcard_profile(Some("IOS_APP_DEVELOPMENT"), Some("iOS Team Provisioning Profile: *")));
+        assert!(is_wildcard_profile(None, Some("QH65B2.*")));
+    }
+
+    #[test]
+    fn an_app_specific_profile_is_not() {
+        assert!(!is_wildcard_profile(
+            Some("IOS_APP_DEVELOPMENT"),
+            Some("iOS Team Provisioning Profile: com.example.app")
+        ));
+        assert!(!is_wildcard_profile(None, None));
     }
 }

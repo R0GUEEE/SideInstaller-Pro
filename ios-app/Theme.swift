@@ -606,14 +606,18 @@ struct StatusDot: View {
     var idle = false
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(idle ? Theme.muted : color)
-                .frame(width: 6, height: 6)
-            Text(text)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        let label = Label(text, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        // Liquid Glass needs iOS 26+; fall back to the tinted capsule.
+        if glass, #available(iOS 26.0, *) {
+            label.glassEffect(.regular, in: Capsule())
+        } else {
+            label.background(Capsule().fill(color.opacity(0.16)))
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
@@ -657,21 +661,85 @@ struct BrandHeader<Accessory: View>: View {
     var beta: Bool = false
     /// A line tucked under the title, close enough to read as one block.
     var subtitle: String? = nil
+    var animateIcon: Bool = false
+    /// The tab pages' header: a small glyph beside the title, then the
+    /// accessory, instead of a hero that takes a third of the screen.
+    var compact = false
+    /// Controls drawn at the trailing edge of the compact row, beside the title
+    /// rather than in a navigation bar above it.
+    var trailingActions: AnyView? = nil
     @ViewBuilder var accessory: () -> Accessory
 
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     /// True in a short window, where the header takes one row.
     private var isRow: Bool { verticalSizeClass == .compact }
-    private var glyphSide: CGFloat { isRow ? 48 : 72 }
+    private var glyphSide: CGFloat { compact ? 34 : (isRow ? 56 : 86) }
     private var alignment: HorizontalAlignment { isRow ? .leading : .center }
 
     var body: some View {
+        if compact {
+            compactBody
+        } else {
+            heroBody
+        }
+    }
+
+    /// One row for the glyph and the title, and the accessory under them. About
+    /// 70 points instead of the hero's 140, which is a card's worth of the page
+    /// back — on the three tabs that open with a list, that's what matters.
+    /// One row: glyph, title, the status, then the page's own buttons. The
+    /// status sits between the icon and the actions rather than under them, so
+    /// the header is a single band and the title can give way to it.
+    private var compactBody: some View {
+        HStack(spacing: 10) {
+            glyph
+                .frame(width: 34, height: 34)
+                .shadow(color: Theme.glow, radius: 8, x: 0, y: 4)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(title)
+                        .font(.title3.weight(.bold))
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    if beta { BetaBadge() }
+                }
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 6)
+            if hasAccessory {
+                // A status is a label, not a button: it gives way first, so the
+                // title and the actions keep their space.
+                accessory()
+                    .layoutPriority(-1)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let trailingActions {
+                trailingActions
+                    .layoutPriority(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 2)
+    }
+
+    /// True when the page passes something to draw under the title. An
+    /// `EmptyView` still costs the stack its spacing, so it's worth knowing.
+    private var hasAccessory: Bool {
+        Accessory.self != EmptyView.self
+    }
+
+    private var heroBody: some View {
         // One layout that changes shape, so a rotation moves the pieces
         // rather than swapping them out.
         let layout = isRow ? AnyLayout(HStackLayout(spacing: 16))
-                           : AnyLayout(VStackLayout(spacing: 16))
-        layout {
+                           : AnyLayout(VStackLayout(spacing: 14))
+        return layout {
             glyph
                 .frame(width: glyphSide, height: glyphSide)
             VStack(alignment: alignment, spacing: 8) {
@@ -768,75 +836,42 @@ private struct PrimaryButtonBody: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.controlRadius, style: .continuous)
         configuration.label
-            .font(.headline)
-            .foregroundStyle(isEnabled ? Color.white : Theme.muted)
-            // A spinner in the label, while the button's action is under way.
-            .tint(.white)
-            .frame(maxWidth: .infinity, minHeight: 52)
-            .padding(.horizontal, 20)
-            .background(shape.fill(isEnabled ? Theme.blue : Theme.control))
-            .contentShape(shape)
-            .modifier(PressFeedback(isPressed: configuration.isPressed))
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(gradient)
+            )
+            .shadow(color: glow.opacity(0.35), radius: 10, x: 0, y: 5)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.92 : 1)
+            .animation(.snappy(duration: 0.22), value: configuration.isPressed)
     }
 }
 
-/// The quiet button beside or under a primary one: a control fill and a
-/// hairline, in the text colour, red for a destructive role, or `tint` for
-/// an action that carries a warning. Follows `controlSize`.
+/// The quieter half of a button row: the same height, corners and padding as
+/// the primary, with a wash instead of the brand gradient. Shared so a pair of
+/// actions lines up without each page guessing at a height.
 struct SecondaryButtonStyle: ButtonStyle {
-    var tint: Color? = nil
 
     func makeBody(configuration: Configuration) -> some View {
-        SecondaryButtonBody(configuration: configuration, tint: tint)
-    }
-}
-
-private struct SecondaryButtonBody: View {
-    let configuration: ButtonStyleConfiguration
-    let tint: Color?
-    @Environment(\.controlSize) private var controlSize
-    @Environment(\.isEnabled) private var isEnabled
-
-    private var isSmall: Bool { controlSize == .small || controlSize == .mini }
-    private var isLarge: Bool { controlSize == .large || controlSize == .extraLarge }
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: isSmall ? 8 : Theme.controlRadius, style: .continuous)
         configuration.label
-            .font((isSmall ? Font.footnote : isLarge ? .body : .subheadline).weight(.medium))
-            .foregroundStyle(labelColor)
-            .padding(.horizontal, isSmall ? 12 : 16)
-            .frame(minHeight: height)
-            .background(shape.fill(Theme.control))
-            .overlay(shape.strokeBorder(Theme.hairline, lineWidth: 1))
-            .contentShape(shape)
-            .opacity(isEnabled ? 1 : 0.4)
-            .modifier(PressFeedback(isPressed: configuration.isPressed))
-    }
-
-    private var height: CGFloat {
-        switch controlSize {
-        case .mini, .small:       32
-        case .large, .extraLarge: 52
-        default:                  44
-        }
-    }
-
-    private var labelColor: Color {
-        if configuration.role == .destructive { return Theme.negative }
-        return tint ?? .primary
-    }
-}
-
-/// A press: the button gives a little, then springs back without bouncing.
-private struct PressFeedback: ViewModifier {
-    var isPressed: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(isPressed ? 0.98 : 1)
-            .opacity(isPressed ? 0.85 : 1)
-            .animation(.smooth(duration: 0.15), value: isPressed)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.primary.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.10))
+            )
+            .opacity(configuration.isPressed ? 0.72 : 1)
+            .animation(.snappy(duration: 0.2), value: configuration.isPressed)
     }
 }
 

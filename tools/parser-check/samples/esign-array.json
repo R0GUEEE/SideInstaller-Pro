@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Array App",
+    "version": "4.0",
+    "icon": "https://example.com/a.png",
+    "url": "https://example.com/array.ipa",
+    "size": 104857600,
+    "bundleID": "com.example.array"
+  },
+  {
+    "name": "Second Array App",
+    "version": "1.0",
+    "icon": "https://example.com/b.png",
+    "url": "https://example.com/second.ipa"
+  }
+]

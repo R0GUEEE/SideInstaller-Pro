@@ -8,14 +8,19 @@ struct ContentView: View {
     @EnvironmentObject private var updateChecker: UpdateChecker
     /// Observed so labels redraw when the language changes.
     @EnvironmentObject private var loc: Localizer
+    /// Watched so the Advanced row summarises what's currently configured.
+    @ObservedObject private var appConfig = AppConfigStore.shared
     @Environment(\.openURL) private var openURL
-    @State private var showSettings = false
     @State private var showImporter = false
+    /// The multi-file picker behind Bulk install.
+    @State private var showBulkImporter = false
+    /// The App configuration sheet (identity, structure, tweaks).
+    @State private var showAppConfig = false
     /// True while the pairing-file picker is up.
     @State private var showPairingImporter = false
-    /// When false, the Advanced section under the Install button shows only its
-    /// title.
-    @State private var advancedExpanded = false
+    /// The two collapsible halves of the configuration card.
+    @State private var ipaExpanded = false
+    @State private var tweaksExpanded = false
     /// When false, the timeline shows only the current step.
     @State private var stepsExpanded = false
     /// True while the Install button is held down. Its surface is drawn outside
@@ -25,61 +30,40 @@ struct ContentView: View {
     @State private var confirmingCancel = false
     /// Text in the IPA download-link field.
     @State private var ipaLink = ""
+    /// The post-install toast's trust steps, when it's tapped.
+    @State private var showTrustSteps = false
+    /// The line of installs, and what the clipboard last offered.
+    @ObservedObject private var queue = InstallQueue.shared
+    @State private var clipboardURL: URL?
+    @State private var didCheckClipboard = false
     @FocusState private var linkFieldFocused: Bool
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: 14) {
                     header.cascadeItem(0)
                     if updateChecker.showBanner {
                         updateBanner.transition(.cardAppear)
                     }
-                    appCard.cascadeItem(1)
-                    // Below iOS 27 a pairing file must be imported, so show the
-                    // import card.
-                    if showsPairingCard {
-                        pairingFileCard.cascadeItem(2)
-                    }
-                    // Most-blocking requirement first: an unsupported iOS, then
-                    // Wi-Fi if this run must pair, then the missing tunnel.
-                    if !engine.isRunning {
-                        if !engine.osSupported {
-                            osRequirement.cascadeItem(cascade(2))
-                        // Only a run that pairs itself needs Wi-Fi; an imported
-                        // pairing file never touches the local network.
-                        } else if !engine.wifiConnected, engine.needsFreshPairing, engine.canSelfPair {
-                            wifiRequirement.cascadeItem(cascade(2))
-                        // Not when Install starts LocalDevVPN itself.
-                        } else if !engine.tunnelAvailable {
-                            vpnRequirement.cascadeItem(cascade(2))
-                        }
-                    }
-                    // The Install button, which grows into the run's progress.
-                    // Drawn over what follows, so the button below tucks in
-                    // under it.
-                    installSurface
-                        .cascadeItem(cascade(3))
-                        .zIndex(1)
-                    // The progress outlives its run, so the button comes back
-                    // under it. The cascade handles its entrance (including
-                    // on a tab switch), so the transition only covers removal.
+                    // What blocks a run comes first: an unsupported iOS, Wi-Fi
+                    // if this run must pair, the missing tunnel.
+                    requirements.cascadeItem(1)
+                    installCard.cascadeItem(2)
+                    signingCard.cascadeItem(3)
+                    configCard.cascadeItem(4)
+                    // The action sits under the configuration it acts on, not
+                    // pinned over it: nothing is hidden behind a dock.
+                    installSurface.cascadeItem(5)
                     if showProgress && !engine.isRunning {
-                        installButton
-                            .cascadeItem(cascade(4))
-                            .transition(.asymmetric(insertion: .identity, removal: .tuckUnder))
+                        installButton.cascadeItem(6)
                     }
-                    // The build's version, and from iOS 27 (which pairs itself)
-                    // the optional pairing-file import, folded away. Like the
-                    // button above, the cascade brings it back after a run.
-                    if showsAdvanced {
-                        advancedSection
-                            .cascadeItem(cascade(5))
-                            .transition(.asymmetric(insertion: .identity, removal: .quickFade))
-                    }
+                    // Everything that isn't the next install: queued builds, a
+                    // link on the clipboard, the pairing file.
+                    activity.cascadeItem(7)
                     // Guides, the pairing code, errors and success show as
                     // `InstallPopup`, which `RootView` lays over the app.
-                    footer.cascadeItem(cascade(6))
+                    footer.cascadeItem(8)
                 }
                 .padding(20)
                 .pageColumn()
@@ -93,12 +77,26 @@ struct ContentView: View {
                 .animation(.smooth(duration: 0.35), value: engine.deviceSummary)
                 .animation(.smooth(duration: 0.3), value: engine.isRunning)
                 .animation(.smooth(duration: 0.35), value: engine.importedPairingName)
-                .animation(.smooth(duration: 0.35), value: advancedExpanded)
-                .animation(.smooth(duration: 0.35), value: showsAdvanced)
+                // A new import starts the page over: no stale link in the
+                // field, no Advanced left open from the last app.
+                .onAppear {
+            if !didCheckClipboard {
+                didCheckClipboard = true
+                checkClipboard()
             }
+        }
+        .onChange(of: engine.installMenuRevision) { _, _ in
+                    ipaLink = ""
+                    stepsExpanded = false
+                    confirmingCancel = false
+                    linkFieldFocused = false
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
             .background(AppBackground())
-            .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-            .sheet(isPresented: $showSettings) { SettingsView() }
+            .overlay(alignment: .top) { installToast }
+            .animation(.smooth(duration: 0.3), value: engine.toast?.id)
+            .sheet(isPresented: $showTrustSteps) { trustSteps }
             .sheet(isPresented: $showImporter) {
                 FileImporterRepresentableView(allowedContentTypes: [.ipa]) { urls in
                     guard let url = urls.first else { return }   // empty means cancelled
@@ -106,6 +104,15 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea()
             }
+            .sheet(isPresented: $showBulkImporter) {
+                FileImporterRepresentableView(allowedContentTypes: [.ipa],
+                                              allowsMultipleSelection: true) { urls in
+                    guard !urls.isEmpty else { return }
+                    queueBulk(urls)
+                }
+                .ignoresSafeArea()
+            }
+            .sheet(isPresented: $showAppConfig) { AppConfigView() }
             .sheet(isPresented: $showPairingImporter) {
                 FileImporterRepresentableView(allowedContentTypes: UTType.pairingFileTypes) { urls in
                     guard let url = urls.first else { return }   // empty means cancelled
@@ -117,6 +124,163 @@ struct ContentView: View {
         }
     }
 
+    /// The refresh button's work: the build, the release picked, the imported
+    /// file and the signing configuration all go, so the next install can't
+    /// inherit any of it.
+    private func resetMenu() {
+        ipaLink = ""
+        linkFieldFocused = false
+        stepsExpanded = false
+        confirmingCancel = false
+        appConfig.clearAfterInstall()
+        engine.resetInstallMenu()
+        Haptics.tap()
+    }
+
+    /// Clears everything the menu was given. Sits beside the title: the page
+    /// has no navigation title, so a toolbar item would float alone in a band
+    /// of empty space.
+    private var resetButton: some View {
+        Button { resetMenu() } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.accent2)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(Color.primary.opacity(0.07)))
+        }
+        .buttonStyle(.plain)
+        .disabled(engine.isRunning || engine.isImportingIPA)
+        .accessibilityLabel(L("Clear the install menu"))
+    }
+
+    // MARK: Post-install toast
+
+    /// What happened, in a card that goes away by itself: the run's news and the
+    /// one step left, instead of a screen-filling overlay with a Done button.
+    @ViewBuilder
+    private var installToast: some View {
+        if let toast = engine.toast {
+            Button {
+                showTrustSteps = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: toast.needsTrust ? "checkmark.seal.fill" : "checkmark.circle.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(toast.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text(toast.detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                    Spacer(minLength: 4)
+                    if toast.needsTrust {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial,
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.08)))
+                .padding(.horizontal, 20)
+                .padding(.top, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            // Gone on its own after a few seconds; tapping opens the steps.
+            .task(id: toast.id) {
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                if engine.toast?.id == toast.id {
+                    withAnimation(.smooth(duration: 0.3)) { engine.toast = nil }
+                }
+            }
+        }
+    }
+
+    /// The trust steps behind the toast.
+    private var trustSteps: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let guide = engine.guide {
+                        Label(guide.title, systemImage: guide.systemImage)
+                            .font(.headline)
+                        ForEach(Array(guide.steps.enumerated()), id: \.offset) { index, step in
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("\(index + 1)")
+                                    .font(.caption.weight(.bold))
+                                    .frame(width: 20, height: 20)
+                                    .background(Circle().fill(Theme.accent.opacity(0.18)))
+                                Text(step)
+                                    .font(.subheadline)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if let label = guide.actionLabel, let link = guide.actionURLString,
+                           let url = URL(string: link) {
+                            Button {
+                                openURL(url)
+                            } label: {
+                                Text(label).frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(PrimaryButtonStyle())
+                        }
+                    } else {
+                        Text(L("The app is installed. Open Settings › VPN & Device Management to trust it."))
+                            .font(.subheadline)
+                    }
+                }
+                .padding(20)
+                .pageColumn()
+            }
+            .background(AppBackground())
+            .navigationTitle(L("Trust this app"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L("Done")) { showTrustSteps = false }
+                }
+            }
+        }
+    }
+
+    // MARK: Layout pieces
+
+    /// The blocking requirements, most important first.
+    @ViewBuilder
+    private var requirements: some View {
+        if !engine.isRunning {
+            if !engine.osSupported {
+                osRequirement
+            // Only a run that pairs itself needs Wi-Fi; an imported pairing file
+            // never touches the local network.
+            } else if !engine.wifiConnected, engine.needsFreshPairing, engine.canSelfPair {
+                wifiRequirement
+            // Not when Install starts LocalDevVPN itself.
+            } else if !engine.tunnelAvailable {
+                vpnRequirement
+            }
+        }
+    }
+
+    /// The cards that are about something other than this install: the queue,
+    /// the clipboard, the pairing file.
+    @ViewBuilder
+    private var activity: some View {
+        queueCard
+        clipboardCard
+        if showsPairingCard { pairingFileCard }
+    }
+
     // MARK: Derived visibility
 
     private var showProgress: Bool {
@@ -126,13 +290,6 @@ struct ContentView: View {
     /// True on an iPhone new enough to install but too old to pair itself.
     private var showsPairingCard: Bool {
         engine.osSupported && !engine.canSelfPair
-    }
-
-    /// True when Advanced has something to hold: a version to pick (not for a
-    /// custom IPA), or the optional pairing file (iOS 27 and above). A run
-    /// can't take a change to either, so it's away while one goes.
-    private var showsAdvanced: Bool {
-        !engine.isRunning && (engine.installSource != .custom || engine.canSelfPair)
     }
 
     /// Cascade index for items below the pairing-file card, shifted by one when
@@ -160,10 +317,13 @@ struct ContentView: View {
     // MARK: Header
 
     private var header: some View {
-        BrandHeader(icon: "arrow.down.app", image: "AppLogo", title: "SideInstaller") {
-            statusDot
-                .transition(.opacity)
-                .id(statusDotID)
+        BrandHeader(icon: "arrow.down.app.fill", image: "AppLogo", title: "SideInstaller",
+                    animateIcon: engine.isRunning, compact: true,
+                    trailingActions: AnyView(resetButton)) {
+            statusPill
+                .lineLimit(1)
+                .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
+                .id(statusPillID)
         }
     }
 
@@ -270,70 +430,522 @@ struct ContentView: View {
 
     // MARK: App picker
 
-    private var appCard: some View {
-        PanelCard {
-            VStack(alignment: .leading, spacing: 12) {
-                sectionTitle(L("Install"), systemImage: "square.and.arrow.down")
-                // Each app with its own icon, in the menu and in the field.
-                Menu {
-                    Picker(L("Install"), selection: Bindable(engine).installSource) {
-                        ForEach(InstallSource.allCases) { src in
-                            Label {
-                                Text(src.displayName)
-                            } icon: {
-                                Image(uiImage: AppIconMenuImage.image(for: src))
-                            }
-                            .tag(src)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        AppIconTile(source: engine.installSource, side: 28)
-                            .id(engine.installSource)
-                            .transition(.opacity)
-                        Text(engine.installSource.displayName)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.footnote.weight(.medium))
+    /// The install line: what's queued, what's running, what's done.
+    @ViewBuilder
+    private var queueCard: some View {
+        if !queue.items.isEmpty {
+            PanelCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label(L("Install queue"), systemImage: "list.bullet.rectangle")
+                            .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(L("%ld waiting", queue.pending.count))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    // Kept to a plain field's height, the icon included.
-                    .padding(.vertical, -4)
-                    .padding(.leading, -6)
-                    .fieldBackground()
-                    .contentShape(Rectangle())
-                }
-                // A value, not a link: the menu's label keeps the text colour.
-                .tint(.primary)
-
-                // A custom IPA has no release, so the importer takes that slot;
-                // a build with one channel has nothing to pick and no slot.
-                if engine.installSource == .custom || engine.channels(for: engine.installSource).count > 1 {
-                    ZStack {
-                        if engine.installSource == .custom {
-                            importControl.transition(.opacity)
-                        } else {
-                            Picker(L("Release"), selection: Bindable(engine).releaseChannel) {
-                                ForEach(ReleaseChannel.allCases) { channel in
-                                    Text(channel.displayName).tag(channel)
+                    ForEach(queue.items) { item in
+                        HStack(spacing: 8) {
+                            queueGlyph(item)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.name)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                if case .failed(let why) = item.state {
+                                    Text(why)
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                        .lineLimit(1)
                                 }
                             }
-                            .pickerStyle(.segmented)
-                            .transition(.opacity)
+                            Spacer(minLength: 4)
+                            if !queue.isRunning, !item.isFinished {
+                                Button {
+                                    queue.remove(item.id)
+                                } label: {
+                                    Image(systemName: "minus.circle").font(.footnote)
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     }
-                    .transition(.opacity)
+                    HStack(spacing: 8) {
+                        Button {
+                            queue.start()
+                        } label: {
+                            Label(L("Install %ld", queue.pending.count), systemImage: "play.fill")
+                                .font(.footnote.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(queue.isRunning || queue.pending.isEmpty || engine.isRunning)
+
+                        if queue.isRunning {
+                            Button {
+                                queue.cancel()
+                            } label: {
+                                Text(L("Stop")).frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button {
+                                queue.clearFinished()
+                            } label: {
+                                Text(L("Clear done")).frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(queue.items.allSatisfy { !$0.isFinished })
+                        }
+                    }
                 }
             }
-            // On the whole card, so it also resizes smoothly when the slot goes.
+        }
+    }
+
+    private func queueGlyph(_ item: InstallQueue.Item) -> some View {
+        Group {
+            switch item.state {
+            case .waiting:     Image(systemName: "clock").foregroundStyle(.tertiary)
+            case .installing:  ProgressView().controlSize(.small)
+            case .done:        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .failed:      Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+            }
+        }
+        .font(.footnote)
+        .frame(width: 16)
+    }
+
+    /// A link on the clipboard is offered, not taken: reading the pasteboard
+    /// prompts iOS, so the read happens when this is tapped.
+    @ViewBuilder
+    private var clipboardCard: some View {
+        if let url = clipboardURL {
+            PanelCard {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.on.clipboard")
+                        .foregroundStyle(Theme.accent2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L("An .ipa link is on the clipboard"))
+                            .font(.subheadline.weight(.semibold))
+                        Text(url.lastPathComponent.isEmpty ? url.absoluteString : url.lastPathComponent)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 4)
+                    Button(L("Install")) {
+                        engine.installLinkedIPA(url)
+                        clipboardURL = nil
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                    Button {
+                        clipboardURL = nil
+                    } label: {
+                        Image(systemName: "xmark").font(.footnote)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
+    }
+
+    /// Checks whether the clipboard holds something that looks like an .ipa link.
+    /// `hasStrings` doesn't prompt; the value is only read once it's confirmed.
+    private func checkClipboard() {
+        let pasteboard = UIPasteboard.general
+        guard pasteboard.hasStrings || pasteboard.hasURLs else {
+            clipboardURL = nil
+            return
+        }
+        let text = pasteboard.string ?? pasteboard.url?.absoluteString ?? ""
+        guard let link = Engine.downloadLink(text), link.pathExtension.lowercased() == "ipa" else {
+            clipboardURL = nil
+            return
+        }
+        clipboardURL = link
+    }
+
+    /// The install menu: a preset and its version in one row, a custom `.ipa`
+    /// under them, and the signing configuration folded away below — where an
+    /// advanced install is set up before the run, not after it.
+    private var installCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 14) {
+                sectionTitle(L("App selection"), systemImage: "square.and.arrow.down.fill")
+
+                HStack(spacing: 10) {
+                    presetMenu
+                    if engine.installSource != .custom {
+                        versionMenu
+                    }
+                }
+
+                // A custom .ipa is a different kind of choice — no release, no
+                // channel — so it's a button of its own under the preset row.
+                customIPAButton
+                if engine.installSource == .custom {
+                    importControl.transition(.opacity)
+                }
+                bulkInstallButton
+
+                // One line for what the next run will do, assembled from the
+                // same state the controls above write.
+                Text(installSummary)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // On the whole card, so it also resizes smoothly when a slot goes.
             .animation(.smooth(duration: 0.28), value: engine.installSource)
             .animation(.smooth(duration: 0.28), value: engine.stableReleased)
         }
         .disabled(engine.isRunning)
-        // Madeira offers Stable only once its first stable release is out.
-        .task(id: engine.installSource) { await engine.checkStableRelease(for: engine.installSource) }
+        // The menus name the release, so the catalog is fetched when the card
+        // appears rather than when one is opened.
+        .task(id: engine.installSource) {
+            guard engine.installSource != .custom else { return }
+            await engine.loadReleaseCatalog(for: engine.installSource)
+        }
+    }
+
+    /// The three builds SideInstaller knows how to fetch, in a menu.
+    private var presetMenu: some View {
+        Menu {
+            Picker(L("Build"), selection: $engine.installSource) {
+                Text("SideStore").tag(InstallSource.sideStore)
+                Text("SideStore + LiveContainer").tag(InstallSource.liveContainer)
+                Text("Madeira").tag(InstallSource.madeira)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "shippingbox.fill")
+                    .font(.caption)
+                    .foregroundStyle(Theme.accent2)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Build"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(engine.installSource == .custom ? L("Custom .ipa")
+                                                         : engine.installSource.shortName)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08)))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// What the Install button will do, in one line: the build and release,
+    /// then whatever the configuration adds.
+    private var installSummary: String {
+        var parts: [String] = []
+        switch engine.installSource {
+        case .custom:
+            parts.append(engine.customIPAName ?? L("No .ipa chosen yet"))
+        default:
+            parts.append(installTargetName)
+        }
+        let changes = appConfig.config.summary.count
+        if changes > 0 { parts.append(L("%d change(s)", changes)) }
+        if !appConfig.config.tweaks.isEmpty {
+            parts.append(L("%d tweak(s)", appConfig.config.tweaks.count))
+        }
+        if appConfig.config.bypassesSideloadDetection { parts.append(L("detection bypass")) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The release to install, right beside the build it belongs to.
+    private var versionMenu: some View {
+        let source = engine.installSource
+        let catalog = engine.releaseCatalogs[source]
+        let latest = catalog?.latest[engine.selectedChannel]
+        return Menu {
+            Picker(L("Version"), selection: $engine.selectedVersion) {
+                Text(latestLabel(latest)).tag(ReleaseVersion?.none)
+                ForEach(catalog?.others[engine.selectedChannel] ?? []) { version in
+                    Text(version.menuTitle).tag(Optional(version))
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Version"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(engine.selectedVersion?.title ?? latestLabel(latest))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08)))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// Selecting the custom build, and naming what's loaded.
+    private var customIPAButton: some View {
+        Button {
+            engine.installSource = .custom
+            if engine.customIPAName == nil, !engine.isImportingIPA { showImporter = true }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: engine.installSource == .custom
+                      ? "doc.badge.plus.fill" : "doc.badge.plus")
+                    .font(.footnote)
+                    .foregroundStyle(engine.installSource == .custom ? Theme.accent2 : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Custom .ipa"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(engine.customIPAName ?? L("Choose a file or paste a link"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 6)
+                if engine.installSource == .custom {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Theme.accent2)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(engine.installSource == .custom ? Theme.accent.opacity(0.14)
+                                                      : Color.primary.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(engine.installSource == .custom ? Theme.accent.opacity(0.5)
+                                                              : Color.primary.opacity(0.06)))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Several `.ipa` files at once, queued one after another: the engine signs
+    /// and installs one app at a time, so a queue is the only honest shape for
+    /// "these eight".
+    private var bulkInstallButton: some View {
+        Button {
+            showBulkImporter = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.down.right")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.accent2)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(L("Bulk install"))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(queue.pending.isEmpty
+                         ? L("Queue several .ipa files at once")
+                         : L("%d waiting in the queue", queue.pending.count))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.05)))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06)))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(engine.isImportingIPA)
+    }
+
+    /// Stages the picked files and starts the line.
+    private func queueBulk(_ urls: [URL]) {
+        var queued = 0
+        for url in urls {
+            do {
+                let staged = try BulkInstallStage.stage(url)
+                if queue.add(name: staged.lastPathComponent, url: staged) {
+                    queued += 1
+                } else {
+                    try? FileManager.default.removeItem(at: staged)
+                }
+            } catch {
+                engine.log("⚠️ Couldn't queue \(url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        // Copies from earlier batches aren't needed once their item is gone.
+        BulkInstallStage.prune(keeping: queue.items.map(\.url))
+        guard queued > 0 else { return }
+        engine.log("Queued \(queued) .ipa file(s) to install one after another.")
+        queue.start()
+    }
+
+    /// What a run needs besides the build: a certificate, the tunnel, and any
+    /// plugins the app ships — read before the install, so a failure has a
+    /// reason attached to it.
+    private var signingCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 10) {
+                sectionTitle(L("Signing"), systemImage: "checkmark.seal")
+                Toggle(isOn: $engine.extraMemory) {
+                    Label(L("Extra memory"), systemImage: "memorychip")
+                }
+                .disabled(engine.isRunning)
+                Text(L("Requests Apple's Increased Memory Limit when signing or refreshing apps. Saved for future installs. The actual limit depends on the device and provisioning profile. Madeira always requests it; turning this off does not revoke an existing grant."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Divider().opacity(0.12)
+                row(ok: !engine.normalizedAppleID.isEmpty, icon: "person.badge.key",
+                    title: engine.normalizedAppleID.isEmpty
+                        ? L("Sign in with an Apple ID")
+                        : L("Apple ID saved"),
+                    detail: engine.normalizedAppleID.isEmpty ? nil : LogRedactor.maskAppleID(engine.normalizedAppleID))
+                row(ok: engine.tunnelAvailable || engine.startsVPNWhenNeeded, icon: "shield.lefthalf.filled",
+                    title: engine.tunnelAvailable ? L("Tunnel up") : L("Tunnel needed"),
+                    detail: engine.deviceHost)
+                row(ok: !engine.buildExtensions.isEmpty, icon: "puzzlepiece.extension",
+                    title: engine.buildExtensions.isEmpty
+                        ? L("No app extensions")
+                        : L("%d extension(s) to sign", engine.buildExtensions.count),
+                    detail: engine.buildExtensions.first?.bundleID,
+                    neutral: engine.buildExtensions.isEmpty)
+                row(ok: !appConfig.config.tweaks.isEmpty, icon: "syringe",
+                    title: appConfig.config.tweaks.isEmpty
+                        ? L("No tweaks")
+                        : L("%d tweak(s)", appConfig.config.tweaks.count),
+                    detail: appConfig.config.tweaks.first?.name,
+                    neutral: appConfig.config.tweaks.isEmpty)
+            }
+        }
+    }
+
+    private func row(ok: Bool, icon: String, title: String, detail: String?,
+                     neutral: Bool = false) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: neutral ? icon : (ok ? "checkmark.circle.fill" : "exclamationmark.circle.fill"))
+                .font(.caption)
+                .foregroundStyle(neutral ? AnyShapeStyle(.tertiary) : AnyShapeStyle(ok ? .green : .orange))
+                .frame(width: 16)
+            Text(title)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    /// The configuration, as its own card and in two halves: the bundle that
+    /// gets signed, and what gets loaded beside it. Both fold away, and each
+    /// says how much of itself is set.
+    private var configCard: some View {
+        PanelCard {
+            VStack(alignment: .leading, spacing: 12) {
+                sectionTitle(L("Configuration"), systemImage: "slider.horizontal.3")
+                collapsible(title: L("IPA configuration"),
+                            icon: "doc.badge.gearshape",
+                            detail: ipaConfigurationDetail,
+                            expanded: $ipaExpanded) {
+                    InstallSigningPanel(part: .ipa)
+                }
+                Divider().opacity(0.12)
+                collapsible(title: L("Tweak configuration"),
+                            icon: "syringe",
+                            detail: tweakConfigurationDetail,
+                            expanded: $tweaksExpanded) {
+                    InstallSigningPanel(part: .tweaks)
+                }
+            }
+        }
+        .disabled(engine.isRunning)
+    }
+
+    /// One foldable section of the configuration card.
+    private func collapsible<Content: View>(title: String, icon: String, detail: String,
+                                            expanded: Binding<Bool>,
+                                            @ViewBuilder content: @escaping () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.smooth(duration: 0.3)) { expanded.wrappedValue.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Label(title, systemImage: icon)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 6)
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(expanded.wrappedValue ? 180 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded.wrappedValue {
+                content()
+                    .transition(.opacity.combined(with: .offset(y: -4)))
+            }
+        }
+    }
+
+    /// How much of the IPA half is set: identity, plist keys, entitlements,
+    /// capabilities and the detection switch, against the build's own values.
+    private var ipaConfigurationDetail: String {
+        var parts: [String] = []
+        let config = appConfig.config
+        if !config.displayName.trimmed.isEmpty || !config.bundleIdentifier.trimmed.isEmpty {
+            parts.append(L("identity"))
+        }
+        if !config.plistEdits.isEmpty { parts.append(L("%d plist key(s)", config.plistEdits.count)) }
+        if !config.entitlements.isEmpty { parts.append(L("%d entitlement(s)", config.entitlements.count)) }
+        if config.bypassesSideloadDetection { parts.append(L("bypass")) }
+        return parts.isEmpty ? L("Default") : parts.joined(separator: " · ")
+    }
+
+    /// What the tweak half holds.
+    private var tweakConfigurationDetail: String {
+        let count = appConfig.config.tweaks.count
+        return count == 0 ? L("None") : L("%d tweak(s)", count)
     }
 
     /// The two ways in for a custom build: pick a file, or paste a link.
@@ -488,7 +1100,8 @@ struct ContentView: View {
             if showProgress {
                 progressContent
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(20)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                     .transition(.surfaceSwap)
             } else {
                 Button(action: startInstall) {
@@ -692,126 +1305,11 @@ struct ContentView: View {
         .disabled(engine.isImportingPairing)
     }
 
-    // MARK: Advanced
-
-    /// Advanced section under the Install button, collapsed until its title is
-    /// tapped. Holds the build's version and, from iOS 27, the optional
-    /// pairing-file import.
-    private var advancedSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Button { advancedExpanded.toggle() } label: {
-                HStack(spacing: 8) {
-                    sectionTitle(L("Advanced"), systemImage: "slider.horizontal.3")
-                    Spacer(minLength: 4)
-                    // Collapsed, this is the only sign an imported file is in use.
-                    if engine.canSelfPair, engine.importedPairingName != nil {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundStyle(Theme.positive)
-                            .transition(.opacity)
-                    }
-                    disclosureChevron(expanded: advancedExpanded)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain, sound: .tick)
-
-            if advancedExpanded {
-                VStack(alignment: .leading, spacing: 24) {
-                    if engine.installSource != .custom {
-                        versionOption
-                    }
-                    if engine.canSelfPair {
-                        pairingFileOption
-                    }
-                }
-                .transition(.opacity.combined(with: .offset(y: -6)))
-            }
-        }
-        // No card behind it; inset to line up with the card contents above.
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-    }
-
-    /// Which release of the selected build to install. The list follows the
-    /// channel picked above; "Latest" is the default.
-    private var versionOption: some View {
-        let source = engine.installSource
-        let catalog = engine.releaseCatalogs[source]
-        let latest = catalog?.latest[engine.selectedChannel]
-        let shown = engine.selectedVersion ?? latest
-        return VStack(alignment: .leading, spacing: 12) {
-            Label(L("%@ version", source.shortName), systemImage: "clock.arrow.circlepath")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Menu {
-                Picker(L("Version"), selection: Bindable(engine).selectedVersion) {
-                    Text(latestLabel(latest)).tag(ReleaseVersion?.none)
-                    ForEach(catalog?.others[engine.selectedChannel] ?? []) { version in
-                        Text(version.menuTitle).tag(Optional(version))
-                    }
-                }
-            } label: {
-                HStack {
-                    Text(engine.selectedVersion?.title ?? latestLabel(latest))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Spacer()
-                    if engine.loadingCatalog == source {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .fieldBackground()
-                .contentShape(Rectangle())
-            }
-            // A release's title can carry the maintainers' warning ("DO NOT USE").
-            if let shown, shown.hasRemark {
-                Label(shown.menuTitle, systemImage: "info.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let error = engine.catalogErrors[source] {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(L("Couldn't load the other versions: %@", error))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button(L("Try again")) {
-                        Task { await engine.loadReleaseCatalog(for: source, force: true) }
-                    }
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-                    .buttonStyle(.plain, sound: .tap)
-                }
-            }
-        }
-        // Fetched when the section opens, and again for another build.
-        .task(id: source) { await engine.loadReleaseCatalog(for: source) }
-    }
-
     /// "Latest", naming the release it stands for when that has a version.
     private func latestLabel(_ latest: ReleaseVersion?) -> String {
         // The nightly tag names no version, so it isn't repeated.
         guard let latest, latest.tag != "nightly" else { return L("Latest") }
         return L("Latest (%@)", latest.title)
-    }
-
-    /// The optional pairing-file import (iOS 27 and above).
-    private var pairingFileOption: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(L("Pairing file"), systemImage: "lock.doc")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(L("(Optional)"))
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            pairingImportButton
-            pairingDocsLink
-        }
     }
 
     // MARK: Wi-Fi requirement
@@ -872,30 +1370,54 @@ struct ContentView: View {
 
     /// What the install surface holds as a card; `installSurface` draws the
     /// card itself.
+    /// The run's status, kept to one line and a thin bar: the page above it is
+    /// the configuration, and the timeline only appears when asked for.
     private var progressContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Text(progressTitle)
-                    .font(.headline)
-                    .contentTransition(.opacity)
-                Spacer(minLength: 4)
-                Text("\(Int(engine.overallProgress * 100))%")
-                    .font(.headline.monospacedDigit())
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                Image(systemName: statusSymbol)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(progressTint)
+                    .symbolEffect(.pulse, isActive: engine.isRunning && !runFailed)
+                Text(compactStatus)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentTransition(.opacity)
+                Spacer(minLength: 6)
+                Text("\(Int(engine.overallProgress * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                     .contentTransition(.numericText(value: engine.overallProgress))
-                    .animation(.smooth(duration: 0.3), value: engine.overallProgress)
-                stepsDisclosure
-                // Only a run in flight can be cancelled.
                 if engine.isRunning {
                     cancelButton
                         .transition(.opacity)
                 }
+                stepsDisclosure
             }
 
-            InstallProgressBar(progress: engine.overallProgress, tint: progressTint)
+            ProgressView(value: engine.overallProgress)
+                .tint(progressTint)
 
-            stepSection
+            if stepsExpanded {
+                stepSection
+                    .padding(.top, 2)
+            }
         }
+    }
+
+    private var statusSymbol: String {
+        if runFailed { return "exclamationmark.triangle.fill" }
+        if engine.finished { return "checkmark.circle.fill" }
+        return "arrow.triangle.2.circlepath"
+    }
+
+    /// One line: what the run is doing, or how it ended.
+    private var compactStatus: String {
+        if engine.finished { return L("Installed") }
+        if engine.isCancelling { return L("Cancelling") }
+        let step = currentStep.title(for: engine.installSource)
+        return runFailed ? L("Stopped at %@", step) : L("Installing · %@", step)
     }
 
     private var progressTitle: String {
@@ -1250,6 +1772,10 @@ struct InstallPopup: View {
                     linkButtons(L("Import"), systemImage: "square.and.arrow.down")
                 }
             }
+        case .source:
+            // A source link is added straight away (see `receiveLink`), so this
+            // popup never comes up for one.
+            EmptyView()
         case .certificate:
             // Only an unasked-for one asks here; SideStore's reply is imported
             // straight away.
@@ -1391,20 +1917,6 @@ struct InstallPopup: View {
         if let machine = cert.machineLabel { label += " — \(machine)" }
         if cert.isExpired { label += L(" (expired)") }
         return label
-    }
-}
-
-// MARK: - Toolbar
-
-extension View {
-    /// The gear button that opens Settings, shared by every screen.
-    func settingsToolbarItem(isPresented: Binding<Bool>) -> some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
-            Button { isPresented.wrappedValue = true } label: {
-                Image(systemName: "gearshape")
-            }
-            .tint(.primary)
-        }
     }
 }
 
@@ -1702,70 +2214,3 @@ struct FileImporterRepresentableView: UIViewControllerRepresentable {
     }
 }
 
-// MARK: - App icons
-
-extension InstallSource {
-    /// The app's own icon in the asset catalog: the official SideStore,
-    /// LiveContainer, Madeira and AltStore icons from their repositories
-    /// (AGPL-3.0 and GPL-3.0), at 256 px. Nil for a custom IPA.
-    var iconImage: String? {
-        switch self {
-        case .sideStore:     return "SideStoreLogo"
-        case .liveContainer: return "LiveContainerLogo"
-        case .madeira:       return "MadeiraLogo"
-        case .altStore:      return "AltStoreLogo"
-        case .custom:        return nil
-        }
-    }
-
-    /// The symbol on a custom IPA's plain tile, which has no icon to show.
-    var iconSymbol: String { "app.dashed" }
-}
-
-/// An app's tile on the Install tab: its own icon, in its own colours so each
-/// app is easy to tell apart, or a symbol on a plain tile for a custom IPA.
-struct AppIconTile: View {
-    let source: InstallSource
-    var side: CGFloat = 28
-
-    var body: some View {
-        let tile = RoundedRectangle(cornerRadius: side * 23 / 86, style: .continuous)
-        Group {
-            if let image = source.iconImage {
-                Image(image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ZStack {
-                    Rectangle().fill(Theme.raised)
-                    Image(systemName: source.iconSymbol)
-                        .font(.system(size: side * 0.5, weight: .medium))
-                        .foregroundStyle(Theme.muted)
-                }
-            }
-        }
-        .frame(width: side, height: side)
-        .clipShape(tile)
-        // A dark icon would melt into the field without it.
-        .overlay(tile.strokeBorder(Theme.hairline, lineWidth: 1))
-        .accessibilityHidden(true)
-    }
-}
-
-/// An app's tile drawn into an image for its row in a menu. A menu draws a
-/// plain image as a template, in the text colour; this one keeps its own
-/// colours and corners.
-@MainActor
-enum AppIconMenuImage {
-    private static var drawn: [InstallSource: UIImage] = [:]
-
-    static func image(for source: InstallSource) -> UIImage {
-        if let image = drawn[source] { return image }
-        let renderer = ImageRenderer(content: AppIconTile(source: source, side: 28)
-            .environment(\.colorScheme, .dark))
-        renderer.scale = 3
-        let image = (renderer.uiImage ?? UIImage()).withRenderingMode(.alwaysOriginal)
-        drawn[source] = image
-        return image
-    }
-}

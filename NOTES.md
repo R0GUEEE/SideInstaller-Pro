@@ -1718,3 +1718,797 @@ sim. The pieces that need a physical device, LocalDevVPN, or a real Apple ID
 signing, install, house_arrest write) are written but **unverified** — they
 cannot run in this environment. No step fakes success; failures surface raw
 errors in the log.
+
+## Sources and the .ipa inspector
+
+Two features added on top of the install pipeline: browsing AltStore sources, and reading an
+`.ipa` before it's signed. Both reuse what was already there rather than adding a second path.
+
+### Sources (`AltSource.swift`, `SourcesView.swift`)
+
+- The format is decoded leniently: **every field is optional except `name`**, because v1 sources
+  repeat the newest release at the app's top level (`version` / `downloadURL` / `size`) while v2
+  keeps everything under `versions`, and community sources omit whatever they like. A source whose
+  `apps` can't be decoded at all is reported as an error instead of being shown empty.
+- Releases are ordered newest-first from `versions` (AltStore publishes oldest-first); a v1 app's
+  top-level release stands in for a missing `versions` array. A release with no usable http(s)
+  `downloadURL` is dropped, since there'd be nothing to install.
+- The **raw JSON** is what's cached on disk, not the decoded models: the models only decode, and
+  re-encoding would silently drop every field they ignore, turning a cached source into a thin one
+  on the next launch. The cache lives in Caches/Sources, keyed by an FNV-1a hash of the URL.
+- Install goes through `Engine.installLinkedIPA(url)`, the same entry point a
+  `sideinstaller://install` link uses — so a source app gets the identical download → inspect →
+  sign → install run, not a parallel implementation.
+- `sideinstaller://source?url=…` is parsed in `DeepLink` and hands the URL to `Engine.sourceToAdd`,
+  which `RootView` uses to switch to the Tools tab; `ToolsView` presents the add sheet with it
+  filled in. Nothing acts on it until the user taps Add.
+
+### Inspect .ipa (`IPAInspector.swift`, `IPAInspectorView.swift`)
+
+- Reads through the zip central directory with `IPALibrary.archiveFiles` / `contents(of:in:)`, the
+  reader the Downloads list already uses: only the members it needs are inflated.
+- **Mach-O**: `cputype`/`cpusubtype` per slice (fat headers included) for the architecture list,
+  `LC_BUILD_VERSION` (platform 2 = iOS) or `LC_VERSION_MIN_IPHONEOS` for the executable's own
+  minimum iOS, and `LC_ENCRYPTION_INFO(_64)`'s `cryptid` for the App Store encryption flag.
+  The magic is read big-endian, so `CFFAEDFE` — how every iOS arm64 binary starts — means the
+  file's own fields are **little**-endian; getting that backwards reads `ncmds` from the wrong
+  place and walks off the header.
+- Verdicts are separated into blockers (can't work) and warnings (works, but probably not as
+  expected) so the Install button can be disabled on blockers alone.
+- `Engine.installLinkedIPA` runs the same inspector on the freshly downloaded custom import and
+  refuses on a blocker before `runOneClick`, which is what keeps an encrypted App Store `.ipa`
+  from registering an App ID.
+- The inspector runs off the main actor (it may SHA-256 an 80 MB file) and the page keeps the
+  parsed report in `@State`; nothing is written to disk.
+
+### Fixes and the app configuration (second pass)
+
+- **The source browser froze on big repositories.** Four separate costs, all fixed: `VStack`
+  built every row eagerly (`LazyVStack` now); `installableApps` sorted and rebuilt release lists
+  on every body pass (both are computed once, at decode); `AsyncImage` per row re-requested and
+  re-decoded icons on each pass (a `NSCache`-backed `SourceIcon` instead); and the JSON was
+  decoded on the main actor on fetch *and* on cached load (both now `Task.detached`). The
+  `.cascadeItem(index)` entrance delay is 55 ms × index, which for row 400 is 22 seconds — list
+  rows cap it at 7.
+- **`Engine.beginFreshInstallMenu()`** runs on a successful import and does what `resetRun()`
+  does, plus dropping the adopted IPA paths so the download step picks up the new file, selecting
+  `.custom`, and bumping `installMenuRevision`, which `ContentView` watches to clear its own
+  `@State` (link field, Advanced open, expanded steps).
+- **`IPAPatch`** rewrites the `.ipa` itself rather than extracting and re-zipping: the central
+  directory is read, unchanged members are copied as their compressed bytes (their local headers
+  rewritten so a data descriptor is no longer needed), and only changed files are written stored.
+  CRC-32 is computed in-app; the output is a plain zip with no ZIP64, which is what every
+  extractor in the pipeline expects.
+- **Mach-O injection** needs no data shifting. The new `dylib_command` is written into the gap
+  between the end of the load commands and the first `__TEXT` section's file offset — the padding
+  Xcode leaves — and only `ncmds`/`sizeofcmds` change. `MachOInject` refuses (with a clear
+  message) when a binary has no room, rather than shifting segment offsets. Injection is skipped
+  when a command already names the library, so re-applying a configuration is a no-op.
+- **Verification**: `patch-selftest.yml` builds a sample arm64 `.ipa` on a macOS runner, patches
+  it through the same `IPAPatch` the app uses, and asserts with `unzip -t`, `plutil` and
+  `otool -l` that the archive stays valid, the identity and extension IDs are rewritten, the
+  Watch app is gone, `LC_LOAD_DYLIB` names the injected path, an untouched resource is
+  byte-identical, and a second pass injects nothing.
+
+### Debs, injectors, the app manager and the marketplace
+
+- **`DebArchive`** parses the three layers by hand: ar (60-byte headers, even-offset padding), tar
+  (octal sizes, GNU long names, pax headers skipped) and gzip (header flags, then a raw DEFLATE
+  stream — `compression_decode_buffer` with `COMPRESSION_ZLIB`, growing the output buffer because
+  gzip doesn't record the size). xz and zstd debs are refused with a message rather than guessed
+  at. From a package it takes every `.dylib` and every `.framework` binary, which covers both
+  `/Library/MobileSubstrate/DynamicLibraries` and `/var/jb/…` rootless layouts.
+- **Injectors** are user-supplied copies registered per framework kind. A package's `Depends`
+  maps to a kind (`mobilesubstrate` → substrate, `ellekit`, `libhooker`, `substitute`) and that
+  library is injected first; `AppConfigStore.missingInjectors` drives the warning shown before the
+  install rather than after a crash. Distribution of the frameworks themselves is the user's
+  business, not the app's.
+- **`IPAPatch`** grew a plist edit list (typed values, only written when different), an
+  entitlements file writer, per-extension removal and the multi-library injection above. Every
+  library's architecture is checked with the shared `MachO` reader first, so an armv7 or x86 slice
+  is reported instead of injected.
+- **App manager**: `DeviceConnection.uninstall` calls `installation_proxy_uninstall` over the same
+  RSD link the install uses; `Engine.uninstallApp` wraps it with the pairing/connection dance.
+  Re-sign reuses the refresh job for a single app, and *Update to x.y* looks the bundle ID up in
+  every configured source and compares versions numerically.
+- **Marketplace**: `MarketplaceView` is a `NavigationSplitView` — a sidebar of categories and
+  sources, a lazy grid of cards. The catalogue is de-duplicated by bundle ID (newest release wins)
+  and rebuilt only when a source's app count or id changes, for the same reason the old list
+  froze. Categories come from the source's own `category` strings, matched loosely and falling
+  back to "Other", so an unlisted value never hides an app.
+
+### Marketplace: tab and rail
+
+- **Why categories didn't open**: `NavigationSplitView`'s `List(selection:)` only drives the detail
+  column at regular width. On an iPhone the split view is compact, the sidebar is pushed as its own
+  screen, and selection changes have nowhere to go — rows highlight and nothing else happens.
+  `NavigationLink(value:)` in a sidebar has the same problem: it pushes onto the *sidebar's* stack,
+  not the detail's.
+- The fix is not another navigation style but a plain `HStack`: a 96pt rail of `Button`s that set a
+  `Filter` state, a one-point divider, and the grid. It behaves identically at every size, works
+  inside the tab's `NavigationStack` (so `.searchable` and the settings toolbar still apply), and
+  removes a whole class of "selection did nothing" bugs.
+- The tab is `Page.marketplace` in `RootView`, `.dark` like Tools, so the rail reads as a sidebar.
+  `ToolsView` no longer carries a Marketplace row.
+- An install started from the grid or an app's page closes that page: the run takes over the
+  Install tab, and a sheet left open would sit in front of the progress.
+
+### Source shelves, compact rows, and a plist editor that knows the keys
+
+- **Why a source showed nothing**: `catalog` is de-duplicated by bundle ID (newest release wins) so
+  the "All apps" list doesn't repeat an app carried by three repositories. The source filter then
+  searched *that* list, so every app another source also carried had been replaced by that source's
+  copy and disappeared. Fixed with a second index, `bySource`, filled in the same pass; the rail
+  count and the shelf read from it. A source whose fetch failed now shows the error and a retry in
+  its own shelf, plus a warning mark in the rail, rather than an empty-looking section.
+- **Compact layout**: rows rather than cards. One `HStack` per app (44pt icon, two lines of text,
+  version, install button), so a screen shows about twice as many apps and the install action is
+  reachable without opening anything.
+- **Tabs**: `Page` is install / marketplace / apps / tools. About is a `NavigationLink` inside the
+  Settings form, which is where a version number and credits belong.
+- **Configuration reads the build**: `IPAPatch.readInfoPlist` and `.readEntitlements` use the same
+  central-directory reader as the patcher (xcent first, then the embedded profile's `Entitlements`),
+  all off the main actor. Identity fields fill only when empty, so an edit is never overwritten.
+- **Plist catalogue** (`PlistCatalog`): ~50 documented keys with type, one-line purpose and the
+  values Apple defines. The editor picks the control from the key — switch for booleans, menu for
+  enumerations, checkable list for array keys, text otherwise — and completions show the summary so
+  a key can be chosen without knowing its spelling.
+- **Injector fetching** (`InjectorCatalog`): ElleKit is taken from the community repository's
+  `Packages` index (newest `iphoneos-arm64` stanza, then its `.deb`, unpacked with `DebArchive`);
+  Substitute from its GitHub release asset. Both land as a plain library through `addInjectorData`.
+  CydiaSubstrate and libhooker have no published build, so they're manual by definition.
+- **Dependency analysis**: `MachOInject.linkedLibraries` reads `LC_LOAD_DYLIB`/`LC_LOAD_WEAK_DYLIB`
+  names out of a tweak before it's stored, and `TweakInjectorKind.detected(inLibraries:)` maps
+  `libsubstrate`/`ellekit`/`libhooker`/`libsubstitute` to a framework. That covers a bare `.dylib`
+  with no control file, and a package whose `Depends` was stripped.
+
+### JIT, merged marketplace entries, and which .ipa the config describes
+
+- **JIT** (`JITSession`): the sequence is launch-suspended → `vAttach` → `c`. DVT process control
+  (`process_control_launch_app`, RSD) starts the app stopped at its entry point; the debug proxy
+  (`debug_proxy_connect_rsd`) speaks GDB-remote to the device's debugger; attaching is what sets
+  `CS_DEBUGGED`, and with it the right to map executable pages. The connection is deliberately kept
+  open and *not* read from: a stopped process gets one stop reply, and a packet aimed at the socket
+  while the app runs would interrupt it. Liveness is checked out of band through
+  `app_service_list_processes`, so quitting the app ends the session rather than hanging it.
+- **Debug packets**: `debugserver_command_new` takes a name plus arguments, and the proxy
+  hex-encodes only the arguments — so a packet with a payload goes in as name `vAttach;` and the
+  hex string as its single argument. Packets with no payload (`c`) go as a bare name.
+- **Merged marketplace entries**: the catalogue is one entry per bundle ID, but it keeps *every*
+  release from every source, each tagged with the source that carries it. The row's menu and the
+  app page pick from that list; de-duplication is by version string so a build two repos both
+  carry is listed once. Sorting is applied after filtering, so it holds for a source's shelf and a
+  category alike.
+- **Install target for the config page**: `Engine.installTargetIPA` is the downloaded build, else
+  the custom import, else the selected source's copy. Reading `IPILibrary.customImport()` alone was
+  why the page described SideInstaller itself: that slot held the app's own .ipa. The page also
+  re-reads when the Install tab's build changes, and replaces identity values that were carried
+  over from the previous build rather than treating them as user edits.
+
+### Menu loading: the three hot spots
+
+- **Quadratic catalogue build.** Merging releases into one entry per app also needed to know
+  *which* source carried each release, and the first version asked that by scanning every app of
+  every source for a matching release — O(releases × apps). On AppTesters' ~9,900 apps that is tens
+  of millions of comparisons per refresh. Indexing `releaseID → source` while walking each source
+  makes it one pass.
+- **Per-row scans in My Apps.** `refreshable.first(where:)` and a "newest release in any source"
+  lookup ran inside the row body, i.e. for every row on every layout pass. Both are now
+  dictionaries built when the data changes (`jobsByBundle`, `updateCandidates`), so a row is a
+  lookup.
+- **Icon fetching.** Each icon was a separate `engine.appIcon` call: connect `app_service`,
+  handshake, fetch, close. Twenty apps meant twenty round trips before the list stopped showing
+  placeholders. The batch method opens one connection for forty, and the disk cache answers first.
+- **Filtering in `body`.** `visible` recomputed the filter, the search and the sort on every pass,
+  including while scrolling. It's now a `@State` array refreshed by `onChange` of the filter,
+  query, sort and catalogue revision — the same pattern as the source list, which is the lesson
+  from the earlier freeze.
+
+### A lighter marketplace
+
+- **What was kept, and wasn't.** The store used to hold every decoded `AltSource` — the whole
+  document, screenshots and news included — for each source, and the view walked it. It now decodes
+  once, off the main actor, into `MarketEntry` rows (a dozen strings and the release list), drops
+  the document, and merges those. `AltSource`/`AltApp` stay what they are: the decoder.
+- **Fetching.** `refreshAll` runs four tasks at once under a sliding task group; each source sends
+  `If-None-Match` with the `ETag` saved beside its cached JSON, and a 304 reuses the cached bytes.
+  Before, sources were fetched in sequence and always downloaded in full.
+- **What the view does now.** Nothing but filter and sort. The store owns merging, featured keys
+  and per-source counts; the view memoises its visible list against `store.revision`, so a scroll
+  pass touches no catalogue data at all.
+- **Removed**: `SourcesView`, `SourceDetailView`, `AltAppView` and the old `MergerAppView` over
+  `AltSource`. Every one was superseded — the marketplace's rail covers a source, and the merged
+  page covers an app — and each was a second copy of the catalogue on screen.
+
+### Marketplace: controls on top, sources in a manager
+
+- **Why the chips, not tabs.** A `TabView` inside a tab is a lie to the user (two tab bars) and a
+  `Menu` hides the counts. A horizontal `ScrollView` of capsule chips keeps the counts visible,
+  scrolls sideways for a long source list, and costs one row of height.
+- **Categories went to the bottom** as a `safeAreaInset(edge: .bottom)`, so they stay put while
+  the list scrolls and never eat into the top bar's room. The all-categories chip clears the
+  filter only when a category is active, so it doesn't fight the source chips.
+- **Search is an inline field** rather than `.searchable`: the system search field animates into
+  the navigation bar and can't coexist with a second row of controls, which this screen needs.
+- **`SourceManagerView`** does the bulk work: lines parsed and validated through
+  `SourceStore.sourceURL` so the button's count matches what will be added; adds go through the
+  store one at a time (each fetches and indexes, and the store must stay consistent); failures are
+  reported per link rather than aborting the batch.
+
+### My Apps without a device read on open
+
+- `autoLoad` used to call `load(quiet:)` whenever the tunnel looked up, and that opened the link:
+  `ensurePairingConnection` → `tunnelUp` (which can start LocalDevVPN and wait) → `performConnect`.
+  On a screen you flip to just to check an expiry date, that's several seconds of "Reading the
+  device".
+- Now the inventory (`installation_proxy` plists + `misagent` profiles) is cached per UDID in
+  Caches, and the page rebuilds the list from it on first appear. The cache is written on every
+  successful read, so it's never more than one load behind.
+- An automatic re-read is allowed only when `engine.connection.isConnected` — i.e. the link from
+  another screen is already up, so it's a query over an open socket rather than a connection. Load
+  and pull-to-refresh remain the explicit path.
+- `CachedInventory` stores the app dictionaries as a binary plist inside the plist: they're
+  `[String: Any]` from `PropertyListSerialization` (device data), which `Codable` can't take
+  directly.
+
+### Where My Apps' remaining wait was
+
+- `SideloadedApp(plist:)` and `ProvisioningProfile(data:)` run `PropertyListSerialization` per app
+  and per profile, and `ProfileMatcher.match` regex-matches wildcard App IDs against apps — all of
+  it on the main actor inside `adopt`. On a device holding a few hundred profiles (every re-sign
+  leaves one behind) that's the bulk of the stall, cached or not.
+- Both paths now hand `(appPlists, profileBlobs)` to a detached task and come back with the parsed
+  entries, so the tab's first frame doesn't wait for it. The types are annotated
+  `@unchecked Sendable` for that crossing — they're immutable value types over plist data, and
+  nothing mutates them after parsing.
+- The rows are a `LazyVStack`: a row carries a `Menu`, an icon lookup and an expiry label, which
+  adds up when twenty-plus exist.
+- If it's *still* slow, the remaining suspects are the icon batch (one `app_service` connection per
+  40 apps) and `AVFoundation`-free `UIImage(data:)` decoding of 60pt PNGs; the fix there is to
+  downsample with `CGImageSourceCreateThumbnailAtIndex` and store the small image.
+
+### TestFlight in My Apps, and source kinds
+
+- `SideloadedApp.init?(plist:kinds:)` defaults to *excluding* App Store apps but also excluded
+  TestFlight from the manager's parse, so the section had nothing to show. The manager now passes
+  `[.sideloaded, .testFlight]` explicitly.
+- TestFlight builds carry `beta-reports-active`; their profile is Apple's and renews on its own.
+  Offering Refresh/Re-sign on them would register an App ID and install a second copy under a
+  different signature, so those rows only get Open, Info and Delete — and the inline Re-sign button
+  is hidden for them.
+- **SourceKind** is presentation plus one real behaviour. `.altSource` is every JSON catalogue
+  (AltStore, SideStore, Feather, E-Sign, Scarlet all publish the same schema); `.github` reads a
+  repository's releases, one app per distinct `.ipa` asset name, one version per tag. Rate limits
+  are reported as such — 30 releases per repository keeps a single request.
+- **Repository directory** is shipped, not scraped: a curated list works offline, can be trusted,
+  and is the thing you need when the app is freshly installed. Links are community sources; the app
+  doesn't endorse what they carry.
+
+### Verifying the repository market
+
+- Probed every candidate with `curl -L -m 20 -w %{http_code}` and decoded the body, so a 200 that
+  was a web page counted as dead. Sources consulted: the `awesome-altstore` list (victordedomenico),
+  GitHub repository search, SideStore's Community-Source repo, and the stores' own sites. Reddit's
+  JSON API refuses unauthenticated requests now (403), so its lists weren't usable directly; the
+  sources they recommend (AppTesters, CyPwn, Quark, Quantum) were verified individually instead.
+- **Dead, removed**: E-Sign's `esign.yyyue.xyz/appstore.json` (404), AppDB (`repo.appdb.to` — no
+  route), iOS Haven (`apps.json` 404). E-Sign's practical successor in the list is BatSign's own
+  source, which resolves.
+- **Worth knowing**: AppTesters' catalogue reports 9,879 apps but carries no `category` field, so
+  every one of them lands in "Other" in the marketplace — that's the source's own data, not a bug
+  here. It's also 10 MB of JSON, which is why the marketplace decodes to rows and drops the document.
+- Re-verify by re-running the probe script against `RepositoryDirectory.all` before any release
+  that claims these work.
+
+### Why filtered sources were empty
+
+- CyPwn's document has **no `versions` array at all**: each app carries one release at the top
+  level (`version`, `downloadURL`, `size`, `versionDate`) — the v1 shape. That path existed, but it
+  ran *after* a typed `JSONDecoder` had already decided the document's shape: any field whose type
+  didn't match (`size` as a string, `version` as a number, which real sources publish) threw, the
+  typed decode returned nil, and the source index was empty. The marketplace then showed its "no
+  apps" card for that source while the rail still counted the raw app list — exactly the screenshot.
+- **The fix is to stop declaring a schema.** `AltSource`/`AltApp`/`AltVersion` are now built from a
+  `[String: Any]` tree produced by `JSONSerialization`, with `PlistValue` coercing each field
+  (`"1"` and `1` both read as a version). A mistyped field costs that field, not the app.
+- **The models moved apart from the store** so they can be compiled and run where Combine and
+  URLSession don't exist: `AltSource.swift` (models), `SourceStore.swift` (fetch/cache/merge),
+  `SourceKind.swift` (types), `GitHubSource.swift` (release reader).
+- **`tools/parser-check`** decodes real documents through those models and fails if `apps` in the
+  JSON doesn't match what the models produced. CI runs it in a Swift container; CyPwn's host blocks
+  GitHub's runners, so it's skipped there and named as skipped — the three sources that do load are
+  enough to catch a regression, and the CyPwn numbers were checked by hand (209/209).
+
+### One parser for every repository format, and an index cache
+
+- **Formats in the wild**, all now handled by `SourceParser`:
+  - AltStore / SideStore / PAL / SpotC — `{ name, identifier, apps: [ … ] }` with a `versions` array.
+  - GBox — same `apps` array, but `sourceName` / `sourceImage` for the metadata, and apps that carry
+    no bundle ID at all (the row is keyed by `source#name` instead).
+  - Scarlet — either the store shape *or* a category map: top-level keys are categories whose values
+    are app arrays, with `down` for the download, `bundleID`, `icon`, `dev`, and a `META` block.
+  - E-Sign / Feather / hand-rolled — a bare array of app objects, `url` or `link` for the download.
+- **Why a parser and not a decoder:** the previous `JSONDecoder` model required one schema. Real
+  documents disagree on types as well as names, and a single mismatch emptied the whole source.
+  `SourceParser` reads JSON into Foundation objects and coerces each field, so a repository only has
+  to *resemble* the format to be usable.
+- **The cache is the fix for launch time.** `SourceIndex` holds a source's rows, its ETag and when
+  it was fetched, in `Caches/SourceIndex/<hash>.json`. Launch reads those (a few hundred KB at
+  worst) and merges; nothing is downloaded or parsed. `refreshAll(force: false)` only touches
+  sources with no index or an index older than six hours, and each refresh sends `If-None-Match`, so
+  an unchanged source answers 304 and its rows are kept as they are.
+- **`source-parser` CI** decodes live documents (AltStore, AppTesters, GBox, SpotC, Quark) *and*
+  vendored samples of the shapes no live fetch guarantees (Scarlet's category map, GBox metadata, an
+  E-Sign array), failing if any app comes back without a release.
+
+### Telegram channels as a source
+
+- **What's reachable.** Telegram has no unauthenticated API for reading a channel, but it publishes
+  an HTML preview at `t.me/s/<channel>`. That page carries each post's text, the attached document's
+  **name and size**, and the post permalink. It does **not** carry a file URL: Telegram mints those
+  per client session and they expire, so no amount of scraping produces one.
+- **So the entry is honest.** `MarketEntry.Version` gained `direct`. A Telegram release has
+  `direct: false` and its URL is the permalink; the install button opens it in Telegram (iOS hands
+  `https://t.me/...` to the app when installed). A post whose text links a direct `.ipa` also gets a
+  `direct: true` release, and that one installs through the normal pipeline — some channels mirror
+  their files, and this picks that up for free.
+- **Reading it**: blocks are split on `tgme_widget_message_wrap`, the id comes from `data-post`, the
+  document from `tgme_widget_message_document_title`/`_extra` (name and "2 GB"), the date from
+  `<time datetime>`. Entities are decoded and tags stripped; sizes parsed from the text form.
+- **Limits**: public channels only, recent posts only (Telegram paginates the preview), and a
+  channel with previews disabled returns no posts — each of those gets its own message rather than
+  an empty source.
+
+### What each requested channel actually exposes
+
+Measured against the live previews:
+
+| Channel | Result |
+|---|---|
+| `t.me/ipaomtk` | **Readable.** 20 posts in the preview; every one is a write-up ("Vibes (Not Boring) IPA") linking `ipaomtk.com/...`. Listed as 20 apps whose install opens that page. The pages themselves don't link a plain `.ipa` — downloads go through their own signer — so nothing installs directly. |
+| `t.me/ipahub` | **Readable.** Posts carry `.ipa` documents (name + size in the preview, e.g. "PUBGM CHETO CRACK - KAMOHACKS.ipa", "2 GB"). Opening one goes to the post; Telegram mints the file link per session. |
+| `t.me/binnichtaktivsipas` | **Previews off.** `t.me/s/…` redirects to the join page. Nothing readable without an account; the source says so and offers Open in Telegram. |
+| `t.me/blatants` | Same. |
+| `t.me/iOS_Randy420` | Same. |
+| `t.me/c/2573020932/2` | **Private channel.** `t.me/c/<id>` links carry an internal id that no public URL resolves; refused with an explanation rather than trying `t.me/s/c`. |
+
+- **Bug found while doing this:** posts were split on the exact string
+  `<div class="tgme_widget_message_wrap"`, but Telegram renders
+  `class="tgme_widget_message_wrap js-widget_message_wrap"` — so channels like ipaomtk parsed as
+  zero posts. Splitting on the class name alone fixes it.
+- The preview check is a redirect test: after following redirects, a URL that isn't under `/s/`
+  means the channel has no preview, which is a different failure from "no .ipa in it".
+
+### The Telegram studio, and why there's no login
+
+- **What shipped**: channel selection with per-channel scan depth, a scan that walks `?before=`
+  pages, results per channel with their errors, and an AltStore-format document generated from the
+  lot — written to `Documents/Telegram/telegram-source.json`. `SourceStore.sourceURL` learned
+  `file://`, so the app loads its own generated source like any other (the same JSON can be hosted
+  and given to SideStore/AltStore, which is the "live URL" part).
+- **What didn't, and why**: signing in. A Telegram account is an MTProto session: `api_id`/`api_hash`
+  registered at my.telegram.org, a phone login (code via other devices or SMS, 2FA password where
+  set), a session key that is itself a credential as sensitive as an Apple ID, and a file-download
+  path that only such a session can provide. That's a separate subsystem — a Rust MTProto client
+  (grammers) behind the existing FFI, Keychain-stored session, login UI with 2FA, file downloads —
+  and it can't be validated from CI. Rather than a dead "Sign in" button, the account card lists
+  exactly what it would take.
+- **Consequence for the generated source**: Telegram mints file URLs per session, so the generated
+  entries carry the post permalink (or the channel's own page link) as `downloadURL`. The app reads
+  them back, and tapping one opens it. A channel that links a direct `.ipa` in its post text
+  generates a real download URL, and those install normally.
+
+### Telegram authorization: what can be streamlined, and what can't
+
+- **Credential capture** (`TelegramCredentials`): api_id/api_hash from my.telegram.org/apps, shaped
+  checked (numeric id, 32 hex chars), stored as `id:hash` under the Keychain service
+  `com.sideinstaller.telegram` with `kSecAttrAccessibleAfterFirstUnlock`. The setup screen is the
+  three steps Telegram actually requires, with the developer page one tap away.
+- **Why the credentials aren't the login.** A Telegram client authenticates with an MTProto session:
+  `auth.sendCode` → the code (other devices or SMS) → `auth.signIn`, plus SRP for accounts with 2FA,
+  and an auth key that must persist (it *is* the credential). That needs a protocol client in the
+  build; storing api_id/api_hash only removes the registration step.
+- **The offline alternative, which works today**: Telegram Desktop's "Export chat history → JSON"
+  writes `result.json` plus `files/…`. `TelegramExport.read` maps each `.ipa` message to an entry;
+  files beside the JSON become `file://` releases, which the installer already accepts, so they
+  sign and install like any import. For a channel with previews off this is the only path that
+  yields installable apps, and it needs no account at all.
+- **What remains for a real login**: a Rust MTProto client (grammers) behind the existing FFI, session
+  storage bound to the Keychain, a code/2FA UI, and a download path that streams a file from
+  Telegram. Each is verifiable only on a device with a real account, so it should be its own change.
+
+### The loopback source server
+
+- **Why a server at all**: SideStore and AltStore add *sources by URL*. A generated file is one
+  import; a URL is a source. `LocalSourceServer` binds `127.0.0.1` (via `NWParameters
+  .requiredLocalEndpoint`, not `NWListener(using:on:)`, which would listen on every interface) and
+  serves `/telegram-source.json` — regenerated per request, so a scan immediately changes what a
+  client fetches — plus `/health` and an index page that lists the channels and states the limits.
+- **Loopback reachability** is deliberate: any app on the device can reach 127.0.0.1, and iOS's Local
+  Network permission doesn't apply to loopback, so no prompt is involved. Nothing off the device can.
+- **iOS ends it when the app is suspended.** Without a background mode (audio/VoIP/location — none
+  of which this app should claim) a listening socket doesn't survive, so the card says the server
+  runs while SideInstaller is open. A client that fetched the source keeps its copy.
+- **What it can't do**, since it came up: an `api_id`/`api_hash` is app identification, not
+  authorization. Scraping *your* joined channels requires an MTProto session (`auth.sendCode` →
+  code → `auth.signIn`, SRP for 2FA) held on the device. Without that client, the server serves
+  public previews and imported exports, and its index page says exactly that rather than implying
+  the account is connected.
+
+### The preview-off workaround, measured
+
+- **`tg.i-c-a.su/rss/<channel>`** serves a channel as RSS, and its `<enclosure>` URLs are
+  `https://tg.i-c-a.su/media/<channel>/<message>/<file>.ipa` — the files themselves, not pages. A
+  ranged GET returned `206 application/zip`, so they're downloadable and therefore installable.
+- Counts on the channels in question (live, this session): blatants 5, binnichtaktivsipas 5,
+  iOS_Randy420 1, ipaomtk 10 — against 0 for the first three through `t.me/s`.
+- `TelegramSource.entries` now asks both: bridge first (installable links), preview second (newest
+  posts, and the channel's own name), merged by app name. If either fails the other still answers;
+  only when both fail does the source show an error — the bridge's, since it's the one that was
+  supposed to work.
+- **Trade-off stated in the code**: the bridge is a third-party service. It can rate-limit, move or
+  stop; nothing else depends on it.
+
+### Backgrounding: what was built and what was refused
+
+- Built: `beginBackgroundTask` (a ~30 s grace period so a client can finish a fetch after the app is
+  backgrounded) and `BGAppRefreshTask` (registered in `Info.plist` as
+  `com.frizzlem.sideinstaller.telegram`, scheduled four hours out, rescanning and regenerating the
+  source while the app is closed).
+- Refused: keeping the app alive with silent audio under the `audio` background mode, or a location
+  session under `location`. Both are background-mode abuse: they declare a purpose the app doesn't
+  have, they drain the battery, and they're the sort of thing that gets a signing certificate pulled.
+  iOS also throttles silent audio that never plays anything audible, so it isn't even reliable.
+  The UI says this in the card rather than leaving it unexplained.
+
+### Every page, every channel, with pictures
+
+- **Depth**: `Channel.allPages` defaults to true and the scan walks `?before=` until a page repeats
+  or the forty-page backstop hits. The toggle turns it off and brings back the stepper (1–40).
+- **Bridge depth**: its RSS takes `?limit=`; measured — 10 → 10 items, 25 → 25, 50 → 49, 75 → 74,
+  90 → 89, 100 → 99, 120 → 99. So 100 is the request and ~99 the ceiling. It also returns 500 under
+  load, which is why `entries` retries once and then asks for the plain feed: ten items is better
+  than a channel that looks broken.
+- **Icons**: each RSS item's description embeds `<img src="…/media/<channel>/<msg>/preview/thumb.jpeg">`
+  — a per-file preview image, the closest thing to an app icon Telegram publishes. Entries use that,
+  falling back to the channel picture (`<image><url>` in the feed, `og:image` on the preview page,
+  and `tg.i-c-a.su/icon/<channel>/icon.jpg` when neither is present).
+- **Every channel is checked**: the scan reads all channels whose switch is on, keeps going after a
+  failure, and reports per channel — so one dead channel never hides the others' results.
+
+### The configuration toolkit, reachable from Settings
+
+- Settings now carries the same `AppConfigView` the Install screen opens, with the change count in the
+  row. One view, two doors: duplicating it for Settings would have meant two places to keep in step.
+- **Editable load paths**: `Tweak.loadPath` was already what the patcher injects; it just wasn't
+  editable. A `.dylib` now shows a field prefilled with `@executable_path/Frameworks/<name>`, so a
+  library built against `@rpath` or shipped as a framework can name its own path. Packages (`.deb`)
+  don't get the field: their libraries are placed and loaded by the patcher.
+- **Check against the build** compares `config.plistEdits` and `config.entitlements` with
+  `snapshot.plist` / `snapshot.entitlements` (both read from the archive when the page opens) and
+  sorts each into changes / additions / no-ops / invalid. `PlistEdit.object` decides "invalid" — a
+  key whose value can't be typed is caught here rather than during signing.
+
+### Settings that do something
+
+- `AppSettings` is the single place for behaviour that used to be constants: bridge use, page
+  limits, launch scan, server auto-start and port, background refresh and grace period, marketplace
+  order and filtering, default depth. Every key has a default matching the old behaviour, so an
+  install that never opens Settings is unchanged.
+- **Wired end to end**, not decorative: `TelegramSource` skips the bridge when it's off,
+  `BackgroundKeepAlive.scheduleRefresh` refuses when background refresh is off,
+  `LocalSourceServer.start` takes the configured port, `TelegramStudio.allPageLimit` reads the
+  limit, `MarketplaceView`'s initial sort and its non-direct filter come from settings, and the app
+  starts the server/scan at launch when asked.
+- **`SourceStore.shared`**: the store had been created by `RootView`, which left the diagnostics
+  report (and anything else outside the view tree) unable to read the source list. It's a singleton
+  now and `RootView` holds that instance.
+- **Storage** measures `SourceIndex`, `Sources`, `AppIcons` and `Documents/Telegram` — everything the
+  app can rebuild. The `.ipa` library, pairing files and certificates are deliberately absent: they
+  are the user's, not cache.
+- **Diagnostics** is a text file built from settings + storage + sources + channels + the tail of the
+  log. It never includes an Apple ID or a password, which is why the log is passed through the same
+  redactor the problem report uses.
+
+### Bug sweep
+
+Scanned the whole app for the usual defect classes and fixed what turned up:
+
+| Found | Where | Fix |
+|---|---|---|
+| `@Published` mutated off the main actor — `refresh()` ran in whatever context called it | `SourceStore` | every state-touching method is `@MainActor`; the class stays non-isolated so `shared` is readable from a property initializer |
+| Generated source rewritten once per HTTP request | `LocalSourceServer` | five-second cache of the document |
+| `force` accepted and ignored, so a manual refresh still sent `If-None-Match` | `SourceStore.refresh` | force now omits the ETag |
+| A settings toggle had no visible effect until the next catalogue revision | `MarketplaceView` | observes `showNonDirectEntries` |
+| Sign-in inside the per-app loop | `AutoResign` | one `prepareRefresh` before the loop |
+| Results list cleared while a scan was running | `TelegramStudio` | assign once, at the end |
+| Profile matching in a SwiftUI body | `Renewals` settings | computed on appear |
+| `scheduleRefresh()` called from a non-isolated `didSet` | `AppSettings` | hopped to the main actor |
+
+Checked and left alone: the seven `URL(string:)!` sites are all literals (a typo would be caught at
+launch); `LogRedactor`'s one `try!` builds a pattern from escaped literals; no `as!`, no
+`fatalError`; the loopback server and the JIT session both clean up their handles and capture `self`
+weakly in their callbacks.
+
+### Keeping the .ipa, and two more tools
+
+- **Why the cache exists**: a re-sign needs the original `.ipa`. The signed `.app` can't be read back
+  out of another app's container, and a user's download may not survive seven days of Files
+  housekeeping. `IPACache` copies the file after every successful install — and again on every
+  refresh, since a refresh's source is the freshest copy — into `Application Support/IPACache`, not
+  Documents: it's the app's bookkeeping, not something to shuffle in Files.
+- **It joins the library**: `IPALibrary.scan()` now includes cached builds, which is what makes
+  `ProfileMatcher` pair them with installed apps, which is what makes the Re-sign button appear for
+  an app whose download is long gone.
+- **Bounded**: `prune(olderThan: 60 days, keepingUnder: 2 GB)` runs after each store, oldest first.
+  Deleting a copy never touches the installed app; it only means that app can't be renewed until an
+  `.ipa` is supplied again — which the Stored builds page says in as many words.
+- **Stored builds** and **Device** are read-only views over that: list/install/share/delete, and the
+  device's own facts (lockdownd `ProductType`, `BuildVersion`, `UniqueDeviceID`, volume capacity).
+
+### Finishing installs, updating from My Apps
+
+- **`askBeforeAppIDCost`** (Settings, default off) gates the App ID prompt. Off, `confirmAppIDCost`
+  logs the bundle ID it's registering and returns, so `runOneClick` proceeds straight through sign
+  and install. The prompt was the only stop between "tap Install" and the app being on the device.
+- **`MarketplaceRouter`**: a published `pendingSearch` plus a tab switch in `RootView`. My Apps uses
+  it when an app has no newer release in the configured sources — the marketplace is then the place
+  to look, pre-filtered to that bundle ID.
+- **Install all updates** sequences `installLinkedIPA` calls and waits for `engine.isRunning` to clear
+  between them: they share one device link and one signing queue, so firing them together would race.
+- **Installed state in the marketplace** comes from the cached inventory (`SideloadedAppsManager`),
+  so the app page can say "Installed 1.2 — this release is newer" without touching the device.
+
+### The QoL pass, and why each piece is where it is
+
+- **Search in My Apps** filters the same `manager.entries` the sections use, so the TestFlight /
+  sideloaded split survives filtering; the sort only reorders within each section.
+- **`Haptics`** is one small enum so the vocabulary stays consistent (light tap / success / warning /
+  rigid for destructive), and it's called from the engine's outcome, not from every button — a tap
+  that fires on "the run finished" is honest, one that fires on "the button was pressed" isn't.
+- **Info sheet copy/share** exists because the questions people ask ("what's your bundle ID, when
+  does it expire") are answered by a paste, and because the stored-`.ipa` line tells you at a glance
+  whether this app can be re-signed later.
+- **Opened .ipa → Install tab**: `installMenuRevision` already bumps on every import; `RootView` now
+  reacts to it by switching tabs, which covers the share-sheet path and the document picker alike.
+
+
+### The tweak browser, and where it stops
+
+- **It's the file picker with an index in front.** Every package ends up in
+  `AppConfigStore.addTweaks` — the same call the Files picker makes — so the parser can't disagree
+  with injection about what a `.deb` contributes. The browser only decides *which* `.deb`, and
+  verifies it arrived as published (SHA-256 from the index, when present).
+- **`Packages` is Debian control, not JSON.** Continuation lines (a leading space or tab) belong to
+  the key above them; a multi-line `Description` is the common case, and a parser that ignores them
+  silently truncates every description and — worse — merges the next stanza's keys. `stanzas(in:)`
+  folds them, and `tools/tweak-repo-check` reads live indexes in CI so that stays true.
+- **One row per identifier.** A repository lists every build it still serves (Havoc: 3,657 stanzas
+  for 531 packages), so the newest version wins, with arm64 preferred when two builds share a
+  version — rootless and rootful both work, since only the `.dylib` is taken.
+- **Filtered at parse time**: a stanza whose `Architecture` isn't `iphoneos-*` is a macOS or Debian
+  build and can't be injected, so it never reaches the list.
+- **The index is cached as published**, in `Application Support/TweakRepos`, and parsed off the main
+  actor when the store loads — a 2.9 MB index is worth not parsing on the first frame. A failed
+  refresh keeps the cache and shows the error on the repository's row, the way a source does in the
+  marketplace.
+- **Plain `Packages` first, `Packages.gz` second.** Most repositories serve both; the compressed one
+  is read through `DebArchive.gunzip`, which is the same inflater `.deb` members use. `.xz`/`.zst`
+  indexes are not read — the plain or gzip variant is missing on very few repositories, and adding an
+  xz decoder to the app for that isn't worth the code.
+- **Known limit**: no dependency resolution. A tweak's `Depends` picks the injector framework
+  (ElleKit / Substrate / libhooker / Substitute) when it names one, and the configuration page says
+  when that framework isn't added; the rest of the dependencies (preference bundles, libraries like
+  AppList) are not installed, because there is no jailbreak for them to be installed into.
+
+### Tweak updates: identity, not file names
+
+- **A `.deb`'s file name is not its identity.** `Foo_1.4_iphoneos-arm64.deb` becomes
+  `Foo_1.6_iphoneos-arm64.deb`, so a "is this already added?" check by name goes blind exactly when
+  it matters. `Tweak` now keeps the control file's `Package:` and `Version:` (and the repository it
+  came from), and `addTweaks` replaces by identifier: the old file is deleted, the new one recorded,
+  and `weak` / repository carry over.
+- **Legacy tweaks are left alone.** A tweak added before this change has no identifier or version.
+  Matching still falls back to the file name so it reads as "already added" in the browser, but
+  `TweakRepoStore.update(for:)` requires a recorded version — an unknown current version would make
+  every release look newer, and an update badge that's always on is noise, not information.
+- **The update check is a cache read, never a network call.** `update(for:)` looks in the indexes
+  already on disk, so drawing the tweak list costs nothing; the browser's Refresh (or opening it) is
+  what actually refetches. That also means a fresh launch with no index yet shows no badges until
+  something reads a repository, which is honest — nothing has been compared.
+- **Ordering is Debian's `compare(options: .numeric)`**, with one deliberate difference: `~` sorts as
+  punctuation, so `1.0~beta` reads as newer than `1.0` rather than older. Repositories that ship
+  pre-releases this way would otherwise never offer the final release. `tools/tweak-repo-check`
+  asserts the orderings the badge depends on (`1.0.10` > `1.0.9`, nothing > itself) on every change.
+- **Same swap path as adding.** The update button downloads through `TweakRepoStore.file(for:)`
+  (SHA-256 verified when the index publishes one) and calls `TweakPackageInstaller.add`, which is
+  `addTweaks`. The browser and the configuration page therefore can't disagree about what an update
+  produces — they call the same two functions.
+
+### Install menu: the setup is the menu
+
+- **Nothing install-relevant is behind a disclosure any more.** The version picker and the pairing
+  file used to live in an **Advanced** section *below* the button, which meant a run could start
+  with a stale version or someone else's pairing file and the only clue was a smaller section. They
+  are chips inside the install card now — above the button, each showing its current value, so the
+  menu doubles as the receipt for the next run.
+- **Cards, not a dropdown, for the build.** `InstallSource` has four cases and a `Menu`+`Picker`
+  showed one line at a time; the differences between "SideStore" and "SideStore + LiveContainer" are
+  exactly what a one-line menu hides. A 2×2 grid of cards shows all four, their one-line
+  descriptions, and the selection.
+- **The version list is a page, not a menu.** Release titles can carry a maintainer's warning
+  (`0.6.4 (DO NOT USE)`); a `Menu` truncates them and a picker can't show a second line. The sheet
+  lists releases with the remark under the title, plus the channel control and the fetch error with
+  its retry.
+- **Chips are values, not buttons.** `InstallOptionChip` takes its text from engine state
+  (`selectedVersion`, `releaseCatalog.latest`, `importedPairingName`, `config.summary.count`), so a
+  chip can't disagree with what the run will do — there's no second copy of the choice to drift.
+- **The catalog is fetched when the card appears**, not when the version sheet opens, because the
+  chip names the release ("Latest (2.4.1)") and would otherwise read "Latest" until the sheet had
+  been visited once.
+- **`AppConfigView` is unchanged** — it was already the page the Configuration chip opens. The card
+  only gained the chip, which counts `config.summary` so the change is visible without opening it.
+
+### Tools tab: rows as data
+
+- **`ToolEntry` is the page.** Title, status line, glyph, beta flag and destination live in one
+  struct, and `ToolsView` renders sections from an array of them. Search (`haystack`), the section
+  headers and the row count all derive from that list, so a page can't be added without a status line
+  and can't be findable in search but missing from the menu.
+- **One switch builds every destination** (`page(_:)`), so a row's `ToolDestination` and the view it
+  opens can't drift. Pages that own a `NavigationStack` (Sources, Report, About) say so
+  (`presentsAsSheet`) and are presented instead of pushed — pushing one would nest a second stack.
+- **Status comes from the stores, not from the page.** Certificates read `certManager.certs` for the
+  signing certificate's expiry, stored builds read `IPACache.all()` **on appear** (it's a directory
+  listing; a body is not the place), history reads `InstallHistory.shared.entries`, sources and
+  tweak repositories read their published arrays. The only coloured detail is a certificate that is
+  close to expiring or has expired.
+- **Grouping is by what you're doing, not by data source**: "Signing" holds entitlement editing and
+  pairing because they're the three things that decide whether a build installs at all; the
+  inspector sits with builds, not with files.
+- **Why About/Report moved here**: both already existed as sheets opened from Settings or from
+  another page's toolbar. A menu of pages is the honest place for them, and duplicating the entry
+  costs nothing — they're the same views.
+
+### Tools performance: what was actually slow
+
+Every one of these was work in a `body` or a synchronous file call on the main actor, which is why
+the pages felt like they hung rather than merely loading:
+
+| Where | What it did | Now |
+|---|---|---|
+| Device info | `StorageReport.size(of: NSHomeDirectory())` — a recursive walk of every file in the app container — plus `IPACache.totalBytes()`, in a computed property used by `body` | measured once in `onAppear`, in `Task.detached`, into `@State`, with a "Measuring…" row |
+| Stored builds | `IPACache.totalBytes()` in the header's `StatusPill`, i.e. a folder listing on every redraw; `IPACache.all()` on the main actor | `IPACache.load()` (async), and the total summed from the entries already read |
+| Install history | `entry.cachedURL` per row per body — a `fileExists` per row, 200 of them at the limit | one detached pass per appearance building a `Set<UUID>`; the URL is resolved when the button is tapped |
+| Injected libraries | `IPALibrary.contents` inflated each build's whole executable (no cap after the `max:` removal) | `IPALibrary.prefix(of:in:limit:)` inflates the first 8 MB into a small buffer; `compression_decode_buffer` stops when the destination fills, which is exactly the prefix a Mach-O header needs |
+| Report a problem | `ProblemReport.current(engine)` in `body`, which maps and redacts the entire activity log | built once, kept in `@State` |
+| Tools hub | certificate expiry parsed and formatted per redraw | formatted on `onAppear` and when the certificate list changes; `DevCert` shares its `ISO8601DateFormatter`s |
+| Settings › Storage | four directory walks in `onAppear` on the main actor | `Task.detached` |
+| About | QR code drawn by Core Image in `body` | drawn once per address, off-main |
+
+Two rules came out of this and are worth keeping: **no file-system call in a `body`** (a `body` can
+run tens of times a second while a text field has focus), and **no unbounded inflate of a member**
+— a zip entry's `uncompressedSize` is attacker-controlled in a downloaded `.ipa`, so the reader
+bounds what it allocates.
+
+### Settings, folded into Tools
+
+- **The gear was in fourteen toolbars.** `settingsToolbarItem(isPresented:)` was one extension
+  applied by every page, which made Settings look like a property of each screen — the one control
+  that doesn't change with context. It's now a single row at the top of **Tools**, a page that is
+  nothing but "the app's own stuff", presented as the same sheet with the same Done.
+- **What had to be true for the removal to be honest:** every page that lost its gear must still
+  have a way back to the tab bar (they're all pushed inside the tab's `NavigationStack`, or sheets
+  that dismiss), and the one page presented *only* as a sheet from Tools — About — needed its own
+  Done, so `AboutView(showsDone:)` was added (`false` when pushed from Settings, where the back
+  button already exists).
+- **Search doesn't hide it.** The Settings card is drawn only while the search field is empty, so a
+  search shows results only, but the entry itself is not a section entry and doesn't inflate the
+  "N pages" count — it's the app's control, not one of the pages being searched.
+
+### Compact headers for the list tabs
+
+- **`BrandHeader(compact:)`** is one flag on the existing header rather than a second type: the
+  glyph drops from 86 to 34 points, the title from `largeTitle` to `title3`, and the accessory (the
+  status pill) sits under the row instead of under a centred hero. The icon's corner radius and
+  symbol size are derived from `glyphSide`, so they scale with it without a second set of numbers.
+- **Only the three tabs that open with a list use it** — Install, My Apps, Tools. Pushed pages keep
+  the hero: they're read once, not scrolled past.
+- **`hasAccessory`** compares `Accessory.self` with `EmptyView.self` so the stack doesn't reserve
+  spacing for a header that has nothing to show under it. The pill keeps its `.id` and transition,
+  so the cross-fade when the tunnel state changes is unchanged.
+
+### One button size
+
+- **`PrimaryButtonStyle` was the app's biggest control** — `headline`, 16 points of vertical
+  padding, 18-point corners, a 16-point glow — at about 52 points tall, next to `.bordered` buttons
+  at 34 and chips at 30. It's now `subheadline` semibold, 12 points, 14-point corners and a
+  10-point glow: ~40 points, which is the platform's own comfortable touch height and reads as a
+  sibling of the chips rather than a different family.
+- **`SecondaryButtonStyle` exists so pairs line up.** The "No, or I'm not sure" button on the
+  account check was a hand-built copy of the old primary (16 points, radius 18, custom fill); it's
+  the new secondary now, which is defined in the same terms as the primary and will stay in step
+  with it.
+- **The Install button is deliberately excluded.** It isn't a row action: the same surface grows
+  into the run's progress card, and its height and corners are part of that animation. Shrinking it
+  would have made the app's main action the smallest thing on the screen.
+
+### My Apps: the page opens on the apps
+
+- **Three page-wide buttons and two cards sat above the list** — Refresh all, Install all updates,
+  Reload, the JIT card and the refresh-run card. The actions that concerned the whole list are now
+  in the toolbar or under it: updates behind an icon with a count, reload as an icon, refresh all
+  below the last row. The top of the page is the search field and the apps, which is what it's for.
+- **The updates sheet is a list, not a card.** Each row carries the app's icon, `1.2 → 1.6` in
+  monospace and its own install button; the bottom button installs all of them in the same order the
+  card did. `updateAll` still sequences them one at a time — they share the device link and Apple's
+  rate limit.
+- **`preloadIcons()`** runs `loadIcons` for whatever the list already holds, so PNGs cached on disk
+  fill the column before (or without) a device read. That was the difference between a row with an
+  icon and a row with a letter.
+
+### Install menu: presets, then everything else
+
+- **A dropdown and a version menu share a row** because they're one decision: what to install, and
+  which release of it. The dropdown only lists the three builds SideInstaller can fetch; the custom
+  `.ipa` is a separate button because it isn't a release at all.
+- **`InstallSigningPanel`** is the expander's body, and each section states the honest limit: the
+  identity fields keep the build's own value when empty, a capability writes the keys the app
+  expects but the profile decides what's granted, and an injector is only downloadable for the two
+  that are open source.
+- **`AppCapability`** maps a switch to plist keys and entitlements, and its disable path removes
+  only the value it wrote from a list (`UIBackgroundModes` keeps `location` when `audio` goes),
+  rather than deleting the key someone else may have set.
+- **Tweak storage is its own store** (`TweakLibrary`) with a JSON index beside the files; applying
+  goes through `AppConfigStore.addTweaks`, so the library can't disagree with the configuration
+  about what a `.deb` contributes.
+
+### Bulk install, and why the files are copied first
+
+- **A picker URL is a lease, not a path.** `startAccessingSecurityScopedResource()` ends when the
+  picker closes, so a queued URL would be unreadable by the time the queue reached it.
+  `BulkInstallStage` copies each file into `Application Support/BulkInstall` first, and
+  `prune(keeping:)` deletes copies whose item has left the queue.
+- **The queue already existed**, from the "install queue" work: it starts a build, waits for
+  `Engine.isRunning` to clear, records done/failed and pauses two seconds between items. Bulk install
+  only needed `run()` to take a file URL through `installLocalIPA` instead of the link path.
+
+### Settings adopted, then cleared
+
+- **Adoption is deliberately partial.** `AppConfigStore.adopt(info:entitlements:)` takes the identity
+  and the five capabilities the panel can express; copying every `Info.plist` key would be noise,
+  and copying the build's entitlements would write back a document the signing profile replaces.
+- **Clearing happens at one place**: the end of `runOneClick`, after `stopBackgroundWork()`. That
+  covers success, failure and cancellation without three call sites drifting, and it's what makes
+  back-to-back installs safe — the second app can't inherit the first one's bundle ID, capability
+  edits or injected dylibs. `reset()` deliberately leaves injectors alone.
+
+### Telegram: listing an account's channels without an account
+
+- **There is no MTProto client in this build**, so "every channel I'm in" can't be asked of
+  Telegram directly. The full desktop export already answers it: `result.json` carries
+  `chats.list` (every dialog, with `username` for public channels) and `messages` tagged with
+  `peer_id`. `TelegramDiscovery` joins the two — `.ipa` counts per peer — and the studio offers the
+  result as a list.
+- **Peer ids arrive in two shapes** (`channel123456` and `123456`); both are reduced to digits so the
+  join works. A single-chat export has no chat list and falls back to the JSON's own name.
+- **Only public handles are addable**: without one there's no `t.me/s/` preview to read, and no
+  account to read it with. Those channels stay in the list, marked, rather than being hidden — a
+  list that silently drops half the account is worse than one that explains itself.
+
+### Background keep-alive
+
+- **Two modes, both declared in the plist already** (`audio`, `location`): silent audio through
+  `AVAudioEngine` with a looped empty buffer, or `CLLocationManager` at three-kilometre accuracy with
+  `allowsBackgroundLocationUpdates`. The audio session is the dependable one; location costs less
+  battery but dies without permission and puts an arrow in the status bar.
+- **`pendingLocationStart`** exists because `requestAlwaysAuthorization` returns immediately: without
+  it, `start(.location)` would mark the keep-alive running before anything was, and the delegate's
+  guard (`mode == .off`) would then refuse to start it. The delegate is where a granted prompt
+  finishes the job.
+- **Restore is asymmetric on purpose**: audio comes back at launch (it's silent and expected), but
+  location only does when permission is already there — a prompt on launch would be the app asking
+  for something the user didn't just request.
+- **`BackgroundKeepAlive` (BGTask, for the Telegram source) is untouched**: that's the periodic
+  refresh path, a different mechanism with a different ceiling. This one is the deliberate
+  user-facing switch.

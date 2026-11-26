@@ -111,6 +111,8 @@ SideInstaller opens three kinds of `sideinstaller://` link, and asks before acti
 
 - `sideinstaller://install?url=<percent-encoded https link to an .ipa>` downloads the IPA as the
   custom .ipa and installs it, for one-tap installs from a website.
+- `sideinstaller://source?url=<percent-encoded https link to a source>` opens **Tools › Sources** with
+  that AltStore source ready to add.
 - `sideinstaller://pairingFile?data=<base64 pairing file>` imports a pairing file. SideStore sends
   one back when asked with `sidestore://pairing?urlname=sideinstaller`, which is what **Get it from
   SideStore** on the Pairing file card does.
@@ -154,6 +156,124 @@ as it does when you set one in the app. Siri knows “Spoof my location to *save
 SideInstaller”, “Reset my location with SideInstaller” and “Refresh my apps with SideInstaller”.
 The actions' names are in English; what they say when they run is in SideInstaller's language.
 
+
+## Marketplace
+
+The **Marketplace** tab browses every AltStore-format source you add, as compact rows — icon, name,
+developer, category, newest version — with an install button on each row — the same JSON catalogues
+AltStore and SideStore read. Its left rail lists the categories the sources file apps under (Utilities, Games, Developer, …) and
+each source, and the list beside it shows what matches: search across every source, tap an app for
+its screenshots and every release, or install the newest one straight from the row. Add a source by pasting its link (AltStore's own, `apps.altstore.io`, is
+there to start with).
+
+It's the same run as any other install: the `.ipa` is downloaded, signed with your Apple ID's
+certificate and put on the iPhone. Nothing else has to be installed first, and no computer is involved.
+Each source is cached, so the list opens without a network and says so when a refresh fails.
+
+## Inspect an .ipa
+
+**Tools › Inspect .ipa** reads an archive without unpacking it and shows what installing it would do:
+
+- **Identity** — bundle ID, name, version and build, size, file count, SHA-256.
+- **Compatibility** — the minimum iOS from both the plist and the executable's own header, supported
+  platforms and devices, every architecture in the binary, and whether its code is still encrypted.
+- **Signing** — the embedded provisioning profile and its expiry, and every app extension inside.
+- **Before you install** — the things that quietly break a sideloaded app, marked as a blocker
+  (App Store-encrypted code, a build for a newer iOS, no arm64 slice, no bundle ID) or a warning
+  (an extension with no profile of its own, a release listing another device family).
+
+Builds downloaded from a link or a source are put through the same check before signing, so an
+encrypted App Store copy is refused instead of using up an App ID.
+
+## Tools
+
+The **Tools** tab is the menu of everything that isn't an install — including **Settings**, which is
+its first card: account, tunnel, renewals, storage, the activity log and the rest, in the sheet it
+always was. There is no gear in the corner of the other screens any more; the menu is the one way in.
+
+Below that, the menu is grouped and searchable:
+
+- **Device** — model, iOS build, UDID and storage; location spoofing.
+- **Signing** — certificates (the row shows when the signing certificate expires, in orange as it
+  gets close), entitlements per App ID, pairing, and Side by Side.
+- **Apps & builds** — install history with rollback, Stored builds with the space they take, the
+  injected-libraries inspector and stripper, and Inspect .ipa.
+- **Sources & tweaks** — the marketplace's source list, and the tweak browser with its repository
+  list.
+- **Help** — Report a problem (log, crash logs and a prefilled GitHub issue) and About.
+
+Every row names its page's state, so the tab is also a dashboard: what's expiring, what's stored,
+what's configured. The search field filters the rows by name or by what they say.
+
+## The install menu
+
+The Install tab is the whole setup, in one card above the button:
+
+- **Four build cards** — SideStore, SideStore + LiveContainer, Madeira, or a Custom `.ipa`. Each says
+  what it is, and the custom one opens the file picker and a download-link field.
+- **Version** — the release to install, listed rather than folded into a menu, so a tag's warning
+  ("DO NOT USE") is readable before it's picked. The stable/nightly channel sits at the top of the
+  same page.
+- **Configuration** — for a custom build: the app configuration (identity, extensions, plist keys,
+  entitlements, tweaks, JIT), with the number of changes on the chip.
+- **Pairing** — automatic, or the pairing file you imported. Below iOS 27 the import card stays on
+  the page, because a file is required rather than optional there.
+
+Each chip reads out the current value, so the menu is also the summary of what the next run will do.
+
+## Tweak browser
+
+**Tools › Tweak browser** is the same list **App configuration › Tweaks & injectors › Browse**
+opens: every package the repositories you add publish, searchable by name, bundle identifier,
+developer or section, with each repository's index kept on the device so the list is there offline.
+
+What a package says about itself is kept: its identifier, its version and the repository it came
+from. The tweak list then reads `1.4 · havoc.app`, and when that repository publishes a newer release
+the row offers **Update to 1.6** — downloaded, checksum-checked and swapped in, keeping the
+"optional" choice. The browser itself marks a package as new, already added, or updatable, and
+replacing a package replaces its earlier build instead of loading two copies of the same tweak.
+
+A package is added the way a `.deb` picked from Files is — its libraries are taken out and loaded by
+the app at launch — and nothing is installed to the system or to another app. The download is
+checked against the index's SHA-256 when the repository publishes one, and a package built for
+another platform is left out of the list rather than offered. Anything that names ElleKit,
+Substrate, libhooker or Substitute in its dependencies picks which framework the app loads beside it,
+so the missing-injector warning on the configuration page still applies.
+
+## App configuration
+
+**Install › Advanced › App configuration** changes what goes into a custom `.ipa` before it's
+signed. Every field is optional, and the configuration stays until it's cleared, so the same build
+is prepared the same way each time.
+
+- **Identity** — a new bundle ID (installs alongside the original; extensions are re-prefixed to
+  match, and the new ID is registered as its own App ID), display name, version and build number.
+- **Structure** — drop the app's extensions, or its Watch app.
+- **Info.plist and entitlements** — any top-level key, as text, switch, number or list, and any
+  entitlement written into the app's archived entitlements file (the profile your Apple ID issues
+  still decides what's actually granted).
+- **Extensions** — switch off individual extensions, or remove them all, and drop the Watch app.
+- **Tweaks** — add `.dylib` files or `.deb` packages (each packaged tweak keeps its identifier and
+  version, so a newer release can be offered), or pick one out of a repository with
+  **Browse**: any Sileo/Cydia repository (Havoc and Chariz are there to start with) is read and
+  searched by name, identifier, developer or section, and a package's dependencies are shown before
+  it's added. A package is unpacked and the libraries it
+  installs are taken; each library is copied into the app's `Frameworks` folder and loaded by its
+  main executable through an added `LC_LOAD_DYLIB` (`LC_LOAD_WEAK_DYLIB` with **Optional** on).
+  Rootful and rootless packages both work. Tweaks have to be built for this iPhone — arm64, iOS
+  17.4 or later — and injecting one needs room in the Mach-O header, which Xcode builds have.
+- **JIT** — the app is launched suspended under the device's debugger and resumed with the session
+  held open, which is how iOS lets a process map executable memory. Keep SideInstaller running
+  while you use the app.
+- **Injectors** — ElleKit, CydiaSubstrate, libhooker and Substitute. ElleKit and Substitute can be
+  fetched from where they're published (a repository `.deb` and a GitHub release); the other two are
+  added from a copy you have. A package's dependencies — its `Depends` line, and the libraries it
+  links — pick which one is loaded, and it's injected before the tweak.
+- **Backup** — the whole configuration exports to JSON and imports again.
+
+The archive is rewritten in place and only the files that change are re-encoded, so a 100 MB
+`.ipa` costs a few megabytes of work. Applying the same configuration again is a no-op: the
+identity is already set and the library is already loaded.
 
 ## Compatibility
 

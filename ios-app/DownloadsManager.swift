@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// One IPA in Documents, as the download manager in Settings lists it.
 struct DownloadedIPA: Identifiable, Equatable {
@@ -70,6 +71,63 @@ final class DownloadsManager: ObservableObject {
         hasLoaded = true
     }
 
+    /// Keeps only the newest `.ipa` of each app on disk, deleting older builds of
+    /// the same bundle ID. Returns how many went and how much space came back.
+    ///
+    /// "Newest" is the newer version number, then the later file date; a file
+    /// whose plist can't be read is never deleted, because there's no way to say
+    /// which app it belongs to. The build the Install tab is pointed at survives
+    /// even if another copy is newer — deleting the file under a run would be a
+    /// surprise, not a cleanup.
+    @MainActor
+    @discardableResult
+    static func keepNewestOnly() -> (removed: Int, freed: Int) {
+        let fm = FileManager.default
+        let protected = Set([Engine.shared.downloadedIPAPath,
+                             IPALibrary.customImport()?.url.path].compactMap { $0 })
+
+        // Everything installable, grouped by the app it carries.
+        var groups: [String: [(url: URL, version: String?, date: Date, size: Int)]] = [:]
+        for entry in IPALibrary.scan() {
+            // The re-signing cache is owned by IPACache, not download cleanup.
+            // A newer download is not evidence that it was successfully installed.
+            guard entry.url.deletingLastPathComponent().standardizedFileURL != IPACache.directory.standardizedFileURL else { continue }
+            guard let info = IPALibrary.appInfo(at: entry.url) else { continue }
+            groups[info.bundleID, default: []].append(
+                (entry.url, info.version, entry.modified ?? .distantPast, entry.size))
+        }
+
+        var removed = 0
+        var freed = 0
+        for (_, files) in groups where files.count > 1 {
+            // The winner: highest version, later date as the tie-break.
+            let sorted = files.sorted { lhs, rhs in
+                switch (lhs.version, rhs.version) {
+                case let (l?, r?) where l != r:
+                    return l.compare(r, options: .numeric) == .orderedDescending
+                default:
+                    return lhs.date > rhs.date
+                }
+            }
+            guard !sorted.isEmpty else { continue }
+            for file in sorted.dropFirst() {
+                guard !protected.contains(file.url.path) else { continue }
+                // Never delete a cache entry the app depends on for re-signing
+                // when it is the only copy left for that app.
+                do {
+                    try fm.removeItem(at: file.url)
+                    DownloadLedger.forget(file.url)
+                    removed += 1
+                    freed += file.size
+                    Engine.shared.log("Downloads: removed an older \(file.version ?? "build") (\(file.url.lastPathComponent)).")
+                } catch {
+                    Engine.shared.log("⚠️ Downloads: couldn't remove \(file.url.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+        }
+        return (removed, freed)
+    }
+
     /// Delete one downloaded IPA, then refresh the list.
     @MainActor
     func delete(_ item: DownloadedIPA) {
@@ -94,3 +152,4 @@ final class DownloadsManager: ObservableObject {
         refresh()
     }
 }
+

@@ -1,0 +1,83 @@
+name: source-parser
+
+# Decodes real source documents through the app's own models and fails if any
+# app is dropped or left without a release. "Empty when filtered" was exactly
+# this: a v1 document whose entries the typed decoder threw away.
+#
+# Runs the Swift toolchain on Ubuntu: these models are plain Foundation, so
+# they need no Xcode and no macOS queue.
+
+on:
+  push:
+    paths:
+      - "ios-app/SourceParser.swift"
+      - "tools/parser-check/**"
+      - ".github/workflows/source-parser.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    name: Decode live sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the checker
+        run: |
+          swiftc -O ios-app/SourceParser.swift ios-app/SourceKind.swift \
+            ios-app/MarketEntry.swift ios-app/GitHubSource.swift \
+            tools/parser-check/main.swift \
+            -o /tmp/parser-check
+
+      - name: Decode real sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v curl >/dev/null || (apt-get update -qq && apt-get install -y -qq curl)
+          install -d "$RUNNER_TEMP/src"
+          # Fetch and validate before parsing: an empty body would look like a
+          # source with no apps, which is the bug this check exists to catch.
+          # A host that blocks CI runners is skipped and named, not failed — the
+          # parser is what's under test, not the network.
+          skipped=0
+          fetch() {
+            name="$1"; url="$2"
+            for attempt in 1 2 3; do
+              curl -sL -m 60 --retry 2 -A "SideInstaller/source-parser" "$url" \
+                -o "$RUNNER_TEMP/src/$name.json" 2>/dev/null || true
+              python3 -c "
+          import json, os, sys
+          path, url = sys.argv[1], sys.argv[2]
+          if os.path.getsize(path) < 500: sys.exit(1)
+          try: doc = json.load(open(path))
+          except Exception: sys.exit(1)
+          if not doc.get('apps'): sys.exit(1)
+          print('%-16s %6d apps, %d bytes' % (url, len(doc['apps']), os.path.getsize(path)))
+          " "$RUNNER_TEMP/src/$name.json" "$url" && return 0
+              sleep 5
+            done
+            rm -f "$RUNNER_TEMP/src/$name.json"
+            echo "SKIPPED: $url (unreachable from this runner)"
+            skipped=$((skipped + 1))
+            return 1
+          }
+          ok=0
+          fetch cypwn      https://ipa.cypwn.xyz/cypwn.json       && ok=$((ok + 1))
+          fetch apptesters https://repository.apptesters.org       && ok=$((ok + 1))
+          fetch altstore   https://apps.altstore.io                && ok=$((ok + 1))
+          fetch quark      https://quarksources.github.io/altstore-complete.json && ok=$((ok + 1))
+          # One of each foreign shape: GBox, Scarlet's category map, and an
+          # AltStore document that also carries a META block.
+          fetch gbox       https://raw.githubusercontent.com/MisterCron/GboxRepo/main/repo.json && ok=$((ok + 1))
+          fetch scarlet    https://raw.githubusercontent.com/azu0609/repo/main/scarlet_repo.json && ok=$((ok + 1))
+          fetch spotc      "https://raw.githubusercontent.com/SpotCompiled/SpotC-Repo/main/Scarlet%20Repo.json" && ok=$((ok + 1))
+          echo "decoded sources to check: $ok, skipped: $skipped"
+          test "$ok" -ge 2 || { echo "::error::fewer than two sources could be fetched"; exit 1; }
+          # Vendored samples of the shapes no live fetch guarantees: Scarlet's
+          # category map, GBox's metadata and an E-Sign-style bare array.
+          /tmp/parser-check "$RUNNER_TEMP"/src/*.json tools/parser-check/samples/*.json

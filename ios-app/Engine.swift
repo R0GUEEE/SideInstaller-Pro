@@ -48,8 +48,7 @@ struct Guide: Hashable {
 
 /// What signing a custom IPA costs in App IDs, shown before it's signed.
 struct AppIDCost: Hashable {
-    /// The App IDs signing would register: the app's, if the Apple ID doesn't
-    /// have it yet. Extensions are signed with the app's profile and need none.
+    /// New App IDs for the main app and every retained extension.
     let newIDs: [String]
     /// How many more Apple allows now; nil when it doesn't say.
     let available: Int?
@@ -116,6 +115,12 @@ final class Engine {
     static let shared = Engine()
 
     // MARK: Inputs
+
+    /// Applies to future installs and refreshes. Off stops requesting the
+    /// capability; it does not revoke capabilities already enabled on App IDs.
+    @Published var extraMemory: Bool = UserDefaults.standard.bool(forKey: "signingExtraMemory") {
+        didSet { UserDefaults.standard.set(extraMemory, forKey: "signingExtraMemory") }
+    }
 
     /// Active Apple ID credentials, read from `AccountStore` (entered during
     /// setup, switched in Settings › Account). Views observe the store directly.
@@ -383,7 +388,38 @@ final class Engine {
     var pairingPIN: String?
 
     /// Short human summary of the connected device, e.g. "iPhone · iOS 17.5".
-    var deviceSummary: String?
+    @Published var deviceSummary: String?
+    /// What the last imported build looked like it checks for sideloading, for
+    /// the signing panel. Nil until an import has been scanned.
+    @Published private(set) var sideloadFindings: SideloadGuard.Report?
+    /// A run that just finished, for the small card that dismisses itself.
+    struct InstallToast: Identifiable, Equatable {
+        let id = UUID()
+        var title: String
+        var detail: String
+        var needsTrust: Bool
+    }
+    @Published var toast: InstallToast?
+    /// What the imported build calls itself. Shown as a placeholder in the
+    /// configuration, never written into it: a build that hasn't been touched
+    /// must reach the signer exactly as it was published.
+    struct BuildIdentity: Equatable {
+        var name = ""
+        var bundleID = ""
+        var version = ""
+        var build = ""
+    }
+    @Published private(set) var buildIdentity: BuildIdentity?
+    /// The extension bundles inside the imported IPA: what they are called and
+    /// whether their identifier sits under the app's, which is what iOS (and the
+    /// signer) requires before an extension can be signed with the app.
+    struct BuildExtension: Identifiable, Equatable {
+        var path: String
+        var bundleID: String
+        var isChild: Bool
+        var id: String { path }
+    }
+    @Published private(set) var buildExtensions: [BuildExtension] = []
 
     /// The connected iPhone's UDID and name, from the lockdown handshake.
     private(set) var deviceUDID: String?
@@ -423,7 +459,9 @@ final class Engine {
     /// imported-pairing path asks at most once.
     @ObservationIgnored private var askedLocalNetwork = false
 
-    @ObservationIgnored private var pipelineTask: Task<Void, Never>?
+    private var pipelineTask: Task<Void, Never>?
+    private var lastInstallSucceeded = false
+    private var queuedInstallActive = false
     /// The IPA download a run starts as soon as the network is up, so it runs
     /// alongside pairing and sign-in instead of after them.
     @ObservationIgnored private var prefetch: (source: InstallSource, channel: ReleaseChannel, version: String?,
@@ -524,7 +562,14 @@ final class Engine {
     /// Resumed with the answer to `appIDCost`: true to sign and install.
     @ObservationIgnored private var appIDCostReply: CheckedContinuation<Bool, Never>?
     /// The `sideinstaller://` link waiting for the go-ahead.
-    private(set) var pendingLink: DeepLink?
+    @Published private(set) var pendingLink: DeepLink?
+    /// A source a `sideinstaller://source` link brought, waiting for the
+    /// Sources page to open its add sheet with it.
+    @Published var sourceToAdd: URL?
+    /// Bumped when a newly imported .ipa replaces the one the Install screen
+    /// was set up for, so the page can drop its own state (the link field, an
+    /// open Advanced) and come back as a clean menu for the new app.
+    @Published private(set) var installMenuRevision = 0
     /// When SideStore was last asked for its pairing file, so the file it sends
     /// back can be told from one some other link brought.
     @ObservationIgnored private var sideStorePairingRequestedAt: Date?
@@ -654,24 +699,26 @@ final class Engine {
     /// `afterProbe` is set on the second pass, once a full-tunnel VPN's probe
     /// has answered.
     @MainActor
-    func runOneClick(afterProbe: Bool = false) {
-        guard !isRunning else { return }
+    @discardableResult
+    func runOneClick(afterProbe: Bool = false, fromQueue: Bool = false) -> Task<Void, Never>? {
+        guard !queuedInstallActive || fromQueue else { return nil }
+        guard !isRunning else { return nil }
         // Nothing downstream works on an older iOS.
         guard osSupported else {
             log("⛔️ iOS \(osVersionText) isn't supported — SideInstaller needs iOS \(Engine.minimumTunnelOSText) or later.")
-            return
+            return nil
         }
         // Below iOS 27 this iPhone can't pair with itself, so the run needs a
         // pairing file made elsewhere and imported.
         guard canSelfPair || hasPairingFile else {
             setGuide(Guides.importPairing)
             log("⛔️ iOS \(osVersionText) can't create its own pairing file. Import one under “Pairing file”, then tap Install again.")
-            return
+            return nil
         }
         guard !normalizedAppleID.isEmpty, !applePassword.isEmpty else {
             setGuide(Guides.account)
             log("⛔️ No Apple ID saved. Add one in Settings › Account, then tap Install again.")
-            return
+            return nil
         }
         // Installing a build this iOS can't run would only use up an App ID.
         if let needed = installSource.minimumOSMajorVersion,
@@ -680,13 +727,13 @@ final class Engine {
             lastError = ErrorHelp.explained(L("%@ needs iOS %d or later. This iPhone runs iOS %@.",
                                               installSource.displayName, needed, osVersionText))
             log("⛔️ \(installSource.displayName) needs iOS \(needed) or later; this iPhone runs iOS \(osVersionText).")
-            return
+            return nil
         }
         // A custom install needs its IPA before anything else runs.
         if installSource == .custom, IPALibrary.customImport() == nil {
             setGuide(Guides.customIPA)
             log("⛔️ No IPA imported yet. Tap “Import .ipa” and pick one, then tap Install again.")
-            return
+            return nil
         }
         // The install runs over the loopback tunnel, so require it up front,
         // unless the run can start LocalDevVPN itself (see `ensureNetwork`).
@@ -694,7 +741,7 @@ final class Engine {
         guard !needsFreshPairing || wifiConnected else {
             setGuide(Guides.wifi)
             log("⛔️ Wi-Fi is off, and pairing this iPhone needs it. Connect to a Wi-Fi network, then tap Install again.")
-            return
+            return nil
         }
         guard tunnelAvailable else {
             // A full-tunnel VPN counts as down until its probe answers, which
@@ -704,17 +751,18 @@ final class Engine {
                     await self.settleNetworkStatus()
                     self.runOneClick(afterProbe: true)
                 }
-                return
+                return nil
             }
             setGuide(Guides.vpn)
             log("⛔️ No loopback VPN is connected. Turn one on, then tap Install again.")
-            return
+            return nil
         }
         // A tunnel pointed at this iPhone's own address can never connect.
         guard deviceIPIsUsable() else {
             setGuide(Guides.deviceIPMismatch)
-            return
+            return nil
         }
+        lastInstallSucceeded = false
         resetRun()
         isRunning = true
         log("=== Starting one-click install ===")
@@ -734,6 +782,9 @@ final class Engine {
                 startDevicePreparation()
                 try await signInStep()
                 try await download()
+                // Rename, strip and inject before anything is signed or copied
+                // to the device: both take the patched build.
+                try await applyAppConfiguration()
                 // Signing registers App IDs, which a free Apple ID has few of,
                 // so an imported IPA waits for the go-ahead first, unless it's
                 // one of SideInstaller's own builds, installed like its download.
@@ -752,8 +803,13 @@ final class Engine {
                 let staged = await prestage?.value
                 try Task.checkCancellation()
                 try await install(prestaged: staged)
+                // Keep the build so this app can be re-signed later, whichever
+                // of its sources has gone missing by then.
+                cacheInstalledIPA()
                 try await writePairing(accountConfig: accountConfig, prepared: prepared)
                 finishSuccess()
+                lastInstallSucceeded = true
+                Haptics.success()
                 outcome = .installed
             } catch is CancellationError {
                 log("Install cancelled.")
@@ -767,14 +823,25 @@ final class Engine {
                 lastError = msg
                 log("⛔️ Stopped: \(msg)")
                 failActiveStep(to: .failed)
+                Haptics.warning()
                 outcome = .stopped
             }
             stopBackgroundWork()
+            // Whatever this run was configured with has been baked into the
+            // build (or abandoned with it). Clearing here is what keeps the
+            // next install from inheriting another app's identity, capabilities
+            // and tweaks.
+            AppConfigStore.shared.clearAfterInstall()
+            if lastInstallSucceeded, let signed = signedAppPath {
+                Self.discardSignedBundle(at: signed)
+                signedAppPath = nil
+            }
             isRunning = false
             isCancelling = false
             pairingPIN = nil
             InstallActivity.shared.runEnded(outcome)
         }
+        return pipelineTask
     }
 
     /// Stop the pipeline at the next safe point.
@@ -839,17 +906,15 @@ final class Engine {
         return shown
     }
 
-    /// A finished run's popups: the trust step, the news, and LiveContainer's
-    /// certificate import. With all three up the news leads, so both steps
-    /// follow it; otherwise it comes after the trust step it points to.
+    /// A finished run's popups. The news and the trust step are no longer cards
+    /// in the stack: the app says what happened in a toast that dismisses
+    /// itself, and the steps move to the install menu's configuration — a
+    /// finished install shouldn't hold the screen hostage. LiveContainer's
+    /// certificate import stays a popup, since nothing else asks for it.
     private var finishedPopups: [Popup] {
-        let trust = guide.map(Popup.guide)
         let certificate: Popup? = installedIsLiveContainer && !liveContainerImportClosed
             ? .liveContainerImport : nil
-        let leads = trust != nil && certificate != nil
-        let success: Popup? = successClosed ? nil : .success(installedSourceName, leads: leads)
-        return (leads ? [success, trust, certificate] : [trust, success, certificate])
-            .compactMap { $0 }
+        return [certificate].compactMap { $0 }
     }
 
     /// True for a popup the run is waiting on: closing it cancels the install.
@@ -1806,6 +1871,10 @@ final class Engine {
             if downloadedSource == .custom { downloadedIPAPath = nil }
             setGuide(nil)
             log("Imported \(dest.lastPathComponent) (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(dest.path)), countStyle: .file))).")
+            beginFreshInstallMenu()
+            // Read the build's own settings into the signing configuration, so
+            // the panel shows what this app is instead of the last one's values.
+            adoptBuildSettings(dest)
         } catch IPALibrary.ImportError.notAnIPA {
             // The picker accepts any file. Validation runs on a staged copy, so
             // the previous import is kept.
@@ -1850,6 +1919,7 @@ final class Engine {
             if downloadedSource == .custom { downloadedIPAPath = nil }
             setGuide(nil)
             log("Imported \(dest.lastPathComponent) (\(ByteCountFormatter.string(fromByteCount: Int64(fileSize(dest.path)), countStyle: .file))).")
+            beginFreshInstallMenu()
             return true
         } catch IPALibrary.ImportError.notAnIPA {
             refreshCustomIPA()
@@ -1929,6 +1999,26 @@ final class Engine {
         customIPABuild = url.flatMap(IPALibrary.knownSource(ofIPAAt:))
     }
 
+    /// A different .ipa has just been imported: put the Install screen back to
+    /// how it starts. The previous app's run state — its last error, its
+    /// finished card, its steps — belongs to that app, not this one, and the
+    /// menu should be looking at the build that's about to be installed.
+    @MainActor
+    private func beginFreshInstallMenu() {
+        installSource = .custom
+        // The download step adopts the new file rather than reusing the old
+        // path, which may not even exist any more.
+        downloadedIPAPath = nil
+        downloadedSource = nil
+        downloadedChannel = nil
+        downloadedVersion = nil
+        signedAppPath = nil
+        signedDisplayName = nil
+        resetRun()
+        installMenuRevision += 1
+        log("Install menu reset for the new .ipa.")
+    }
+
     /// Log the way past a failed download: rename a stray IPA, or fetch one
     /// elsewhere when the network is the obstacle.
     @MainActor
@@ -1975,10 +2065,21 @@ final class Engine {
             log("⚠️ Couldn't read the IPA's bundle ID, so its App ID cost isn't known; signing goes ahead.")
             return
         }
+        // A run is meant to finish. The prompt exists to stop a surprise spend,
+        // so it's only shown when the user asked for it.
+        guard AppSettings.shared.askBeforeAppIDCost else {
+            log("App IDs: signing \(bundleID) registers the App IDs it needs — going ahead. Settings › Renewals › Ask before an App ID brings the prompt back.")
+            setStep(.sign, .active)
+            return
+        }
         setStep(.sign, .active)
         let cost: AppIDCost
         do {
-            cost = try await onSignQueue { try self.performAppIDQuota(session: session, bundleID: bundleID) }
+            cost = try await onSignQueue {
+                let extensions = IPAExtensions.read(URL(fileURLWithPath: ipa)).map(\.bundleID)
+                return try self.performAppIDQuota(session: session, bundleID: bundleID,
+                                                  extensionIDs: extensions)
+            }
         } catch {
             log("⚠️ Couldn't check this Apple ID's App IDs (\(short(error))); signing goes ahead.")
             return
@@ -2014,7 +2115,7 @@ final class Engine {
         }
     }
 
-    private func performAppIDQuota(session: OpaquePointer, bundleID: String) throws -> AppIDCost {
+    private func performAppIDQuota(session: OpaquePointer, bundleID: String, extensionIDs: [String]) throws -> AppIDCost {
         struct Quota: Decodable {
             let new_ids: [String]
             let available: Int?
@@ -2023,7 +2124,9 @@ final class Engine {
         }
         var json: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
-        let rc = si_appid_quota(session, bundleID, &json, &error)
+        let ids = try JSONEncoder().encode([bundleID] + extensionIDs)
+        let payload = String(decoding: ids, as: UTF8.self)
+        let rc = si_appid_quota(session, payload, &json, &error)
         guard rc == 0 else {
             let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
             error.map { si_string_free($0) }
@@ -2052,16 +2155,22 @@ final class Engine {
         // the pairing file after the install instead.
         let pairingPath = pairingFilePath ?? PairingController.pairingFilePath()
         let source = downloadedSource ?? installSource
+        let requestExtraMemory = extraMemory
         setStep(.sign, .active)
         do {
             let path = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipa, udid: udid, deviceName: name,
                                      pairingFilePath: pairingPath,
-                                     forMadeira: source == .madeira || Self.isMadeira(ipaPath: ipa))
+                                     forMadeira: source == .madeira || Self.isMadeira(ipaPath: ipa),
+                                     extraMemory: requestExtraMemory)
             }
             signedAppPath = path
             // Read the app's name from the signed bundle (imported IPAs have none before this).
             signedDisplayName = signedAppName()
+            // The signature is checked against its profiles here, before the
+            // upload: an app signed for the wrong identifier installs and then
+            // fails at launch, which looks like an app bug, not a signing one.
+            auditSignedBundle(path)
             setStep(.sign, .done)
         } catch {
             // User-fixable failures get an explanatory card. A certificate that
@@ -2098,25 +2207,31 @@ final class Engine {
     /// its App ID again when it runs out; it can restore the first on a new App
     /// ID, not the second.
     private func performSign(session: OpaquePointer, ipa: String, udid: String, deviceName: String,
-                             pairingFilePath: String, forMadeira: Bool) throws -> String {
+                             pairingFilePath: String, forMadeira: Bool, extraMemory: Bool) throws -> String {
         log("Signing \(ipa) …")
         if forMadeira {
             log("Signing for Madeira: Increased Memory Limit on its App ID (it shows as Memory+), and no app group.")
+        }
+        let increasedMemory = forMadeira || extraMemory
+        if extraMemory && !forMadeira {
+            log("Extra memory: requesting Increased Memory Limit on the app's App IDs before provisioning.")
         }
         var signed: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
         // Memory limit: 1 = required, 2 = where it's safe (see sideinstaller.h).
         let rc = si_sign_ipa(session, ipa, udid, deviceName, pairingFilePath,
-                             forMadeira ? 1 : 2, forMadeira ? 0 : 1, &signed, &error)
+                             increasedMemory ? 1 : 0, forMadeira ? 0 : 1, &signed, &error)
         if rc == 0 {
             let path = signed.map { String(cString: $0) } ?? ""
             signed.map { si_string_free($0) }
             log("Signed bundle at \(path)")
             return path
         } else {
-            let msg = error.map { String(cString: $0) } ?? "rc=\(rc)"
+            let raw = error.map { String(cString: $0) } ?? ""
             error.map { si_string_free($0) }
-            log("Sign FAILED: \(msg)")
+            let msg = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "No diagnostic returned by the signer (rc=\(rc))." : raw
+            log("Sign FAILED (rc=\(rc)): \(msg)")
             if Self.isCertExistsError(msg) { throw EngineError.certExists }
             if Self.isAppIDLimitError(msg) { throw EngineError.appIDLimit }
             if Self.isUnderageError(msg) { throw EngineError.underage }
@@ -2127,6 +2242,105 @@ final class Engine {
             }
             throw EngineError.message(L("Signing failed: %@", msg))
         }
+    }
+
+    /// Reads the signed bundle back and logs what it says: one line per bundle
+    /// with the identifier it was signed for, and any mismatch with the
+    /// profile embedded beside it. Warns rather than stops — the check is a
+    /// second opinion on the signer, and a false alarm must not block an
+    /// install that would otherwise work.
+    @MainActor
+    private func auditSignedBundle(_ path: String) {
+        let audit = SignedBundleAudit.run(appPath: path)
+        log("=== Signature ===")
+        for line in audit.summary { log("  \(line)") }
+        for note in audit.notes { log("  \(note)") }
+        for problem in audit.problems { log("⚠️ \(problem)") }
+    }
+
+    /// Applies the App configuration to a custom `.ipa` in place, before it's
+    /// signed. Anything else — SideStore, LiveContainer, Madeira — is left
+    /// exactly as published.
+    @MainActor
+    private func applyAppConfiguration() async throws {
+        guard (downloadedSource ?? installSource) == .custom,
+              let path = downloadedIPAPath else { return }
+        let store = AppConfigStore.shared
+        let config = store.config
+        guard config.isActive else { return }
+        // An injector the tweaks need but that hasn't been added is worth
+        // saying before the install runs, not after it fails to launch.
+        for kind in store.missingInjectors {
+            log("⚠️ A tweak needs \(kind.title), which isn't added under App configuration › Injectors.")
+        }
+        log("=== Applying app configuration ===")
+        let url = URL(fileURLWithPath: path)
+        let injectors = store.injectors
+        let outcome = try await Task.detached(priority: .userInitiated) {
+            try IPAPatch.apply(config, injectors: injectors, to: url)
+        }.value
+        for line in outcome.applied { log("  \(line)") }
+        for line in outcome.warnings { log("⚠️ \(line)") }
+        if outcome.applied.isEmpty, outcome.warnings.isEmpty {
+            log("  Nothing to change: this build already carries it.")
+        }
+        // What the signer would make of it, checked on the patched archive:
+        // a duplicated identifier or a non-iOS bundle fails here, before the
+        // App IDs are registered and a certificate is used.
+        let audit = await Task.detached(priority: .userInitiated) {
+            IPAPatch.auditBeforeSigning(url)
+        }.value
+        for note in audit.notes { log("⚠️ \(note)") }
+        if let problem = audit.problems.first {
+            for line in audit.problems { log("⛔️ \(line)") }
+            throw EngineError.message(L("This build can't be signed: %@", problem))
+        }
+    }
+
+    /// Copies the IPA this run installed into the cache, keyed by the app's
+    /// bundle ID. Best-effort: a failure is logged and the install stands.
+    @MainActor
+    private func cacheInstalledIPA() {
+        guard let ipa = downloadedIPAPath else { return }
+        let url = URL(fileURLWithPath: ipa)
+        guard let info = IPALibrary.appInfo(at: url) else { return }
+        IPACache.store(url, bundleID: info.bundleID,
+                                    displayName: signedDisplayName ?? info.name)
+        // The history is what makes "roll back to the last build" possible, and
+        // it's written from the same facts the cache just used.
+        InstallHistory.shared.record(bundleID: info.bundleID,
+                                     name: signedDisplayName ?? info.name,
+                                     version: info.version,
+                                     cached: url,
+                                     origin: installSource.displayName)
+        // Retain the latest re-signing copy; only disposable history is budgeted.
+        InstallHistory.shared.trimStorage()
+        // One build per app on disk: an older download of the same app is of no
+        // use once this one is installed, and it is what fills the phone up.
+        let cleaned = DownloadsManager.keepNewestOnly()
+        if cleaned.removed > 0 {
+            log("Downloads: kept only the newest build of each app — removed \(cleaned.removed) older file(s), \(ByteCountFormatter.string(fromByteCount: Int64(cleaned.freed), countStyle: .file)) back.")
+        }
+
+    }
+
+    /// Model, iOS build and UDID as lockdown reports them, for the Device page.
+    struct DeviceDetail {
+        let name: String?
+        let model: String?
+        let build: String?
+        let udid: String?
+    }
+
+    @MainActor
+    func readDeviceDetail() async throws -> DeviceDetail {
+        try await ensurePairingConnection()
+        let pairs = try await onDeviceQueue { try self.connection.deviceInfo() }
+        let info = Dictionary(pairs, uniquingKeysWith: { first, _ in first })
+        return DeviceDetail(name: info["DeviceName"],
+                            model: info["ProductType"] ?? info["HardwareModel"],
+                            build: info["BuildVersion"],
+                            udid: info["UniqueDeviceID"] ?? deviceUDID)
     }
 
     /// True when the IPA at `ipaPath` is Madeira, whichever way it got here: the
@@ -2655,20 +2869,66 @@ final class Engine {
         return payload
     }
 
+    /// Parses a build's plists off the main actor and hands the values to the
+    /// configuration.
+    private func adoptBuildSettings(_ ipa: URL) {
+        Task.detached(priority: .userInitiated) {
+            guard let info = IPAPatch.readInfoPlist(from: ipa) else { return }
+            let entitlements = IPAPatch.readEntitlements(from: ipa) ?? [:]
+            let findings = SideloadGuard.scan(ipa)
+            let extensions = IPAExtensions.read(ipa)
+            let strays = IPAExtensions.strays(in: ipa)
+            let identity = BuildIdentity(
+                name: (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? "",
+                bundleID: info["CFBundleIdentifier"] as? String ?? "",
+                version: info["CFBundleShortVersionString"] as? String ?? "",
+                build: info["CFBundleVersion"] as? String ?? "")
+            // Entitlements are read so the panel can say what the build grants;
+            // they are not copied into the configuration.
+            _ = entitlements
+            await MainActor.run {
+                self.buildIdentity = identity
+                self.buildExtensions = extensions
+                self.sideloadFindings = findings
+                if !extensions.isEmpty {
+                    let stray = extensions.filter { !$0.isChild }
+                    self.log("Extensions: \(extensions.count) found\(stray.isEmpty ? "" : ", \(stray.count) with an identifier outside the app")")
+                }
+                if !strays.isEmpty {
+                    // The signer refuses these; saying so here means the run
+                    // stops before a download, not at the end of signing.
+                    self.log("⛔️ Extension(s) inside Frameworks: \(strays.map(\.bundleID).joined(separator: ", ")) — the signer cannot give these a profile of their own, so this build has to lose them (App configuration › Extensions) before it can be signed.")
+                }
+                // Automatic: a build that clearly looks for Cydia, Frida or a
+                // profile is given the patch without being asked — unless the
+                // build is this app, whose own source holds those strings.
+                let store = AppConfigStore.shared
+                let isSelf = identity.bundleID == Bundle.main.bundleIdentifier
+                if findings.hasPatchable, !isSelf, store.config.detectionBypass == nil {
+                    store.config.detectionBypass = true
+                    self.log("Sideload detection found (\(findings.markers.joined(separator: ", "))) — bypass on for this install.")
+                }
+                if findings.hasUnpatchable, !isSelf {
+                    self.log("Sideload detection: \(findings.frameworks.joined(separator: ", ")) attests to a server; that can't be patched here.")
+                }
+            }
+        }
+    }
+
     // MARK: Success
 
     @MainActor
     private func finishSuccess() {
         finished = true
-        let source = installedBuild
-        if signedAppIsMadeira(source) {
-            setGuide(Guides.trustMadeira(holding: madeiraHandoff))
-        } else if source == .altStore {
-            setGuide(Guides.trustAltStore(holdingPairing: altStoreHoldsPairing))
-        } else {
-            setGuide(Guides.trust(appName: installedAppName))
-        }
-        log("✅ Done — \(installedSourceName) is installed. One trust step left (see the card).")
+        let source = downloadedSource ?? installSource
+        setGuide(signedAppIsMadeira(source)
+                 ? Guides.trustMadeira(holding: madeiraHandoff)
+                 : Guides.trust(appName: installedAppName))
+        toast = InstallToast(
+            title: L("Installed %@", installedSourceName),
+            detail: L("Open Settings › VPN & Device Management to trust it."),
+            needsTrust: true)
+        log("✅ Done — \(installedSourceName) is installed. Trust it in Settings › VPN & Device Management.")
     }
 
     // MARK: - FFI liveness check
@@ -3148,6 +3408,13 @@ final class Engine {
             // A run's own popups come first; the log keeps the reason.
             if !isRunning { lastError = message }
         case .link(let link):
+            // A source has nothing to confirm: adding it only writes down a
+            // URL, and the page it opens shows what came back.
+            if case .source(let url) = link {
+                sourceToAdd = url
+                log("Link: \(link.logDescription).")
+                return
+            }
             if case .pairingFile = link { sideStorePairingRequestedAt = nil }
             if case .certificate(let cert) = link, cert.fromSideStore {
                 let retryInstall = sideStoreCertificateRequest?.retryInstall ?? false
@@ -3184,6 +3451,9 @@ final class Engine {
             }
         case .certificate(let cert):
             certificateToImport = CertificateImport(certificate: cert, retryInstall: false)
+        case .source(let url):
+            // Never reached: a source link is acted on in `receiveLink`.
+            sourceToAdd = url
         }
     }
 
@@ -3192,14 +3462,134 @@ final class Engine {
     /// and the update banner.
     @MainActor
     func installLinkedIPA(_ url: URL) {
-        guard !isRunning, !isImportingIPA else { return }
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
         lastError = nil
         installSource = .custom
         Task { @MainActor in
             // Installs only what the link brought: a failed download leaves
             // its error up instead of installing the previous import.
             guard await self.importCustomIPA(fromLink: url.absoluteString) else { return }
+            // The download is on disk and it's this app's job to say no to a
+            // build that can't work — an encrypted App Store copy, say —
+            // before signing registers an App ID for it.
+            if let report = await Self.inspectCustomImport() {
+                let blockers = report.issues.filter { $0.severity == .blocker }
+                if let blocker = blockers.first {
+                    self.lastError = ErrorHelp.explained(L("%@: %@", blocker.title, blocker.detail))
+                    self.log("⛔️ Not installing \(report.fileName): \(blocker.title.lowercased()). Inspect .ipa has the details.")
+                    for extra in blockers.dropFirst() {
+                        self.log("   also: \(extra.title) — \(extra.detail)")
+                    }
+                    return
+                }
+            }
             self.runOneClick()
+        }
+    }
+
+    /// Reads the IPA in the custom slot for its pre-install report, off the
+    /// main actor since it walks the archive. Nil when there's nothing to read.
+    nonisolated static func inspectCustomImport() async -> IPAReport? {
+        guard let url = IPALibrary.customImport()?.url else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            IPAInspector.inspect(url)
+        }.value
+    }
+
+    /// Copies an `.ipa` already on disk (picked, inspected, or dropped in by
+    /// another app) into the custom slot and installs it, signed with the Apple
+    /// ID's certificate. Used by the Inspect page's Install button and by a
+    /// source's app page.
+    @MainActor
+    /// Forgets everything the Install tab was given: the imported `.ipa` (and
+    /// its copy on disk), the release picked, the build and channel, and the
+    /// last run's state. The next install starts from a clean menu.
+    func resetInstallMenu() {
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
+        if let imported = IPALibrary.customImport()?.url {
+            try? FileManager.default.removeItem(at: imported)
+        }
+        customIPAName = nil
+        toast = nil
+        sideloadFindings = nil
+        buildIdentity = nil
+        buildExtensions = []
+        downloadedIPAPath = nil
+        downloadedSource = nil
+        downloadedChannel = nil
+        downloadedVersion = nil
+        signedAppPath = nil
+        signedDisplayName = nil
+        selectedVersion = nil
+        installSource = .sideStore
+        releaseChannel = .stable
+        lastError = nil
+        resetRun()
+        // Views that hold their own fields (the link, the expanded sections)
+        // listen for this and start over too.
+        installMenuRevision += 1
+        log("Install menu cleared: no imported .ipa, no picked release, no configuration.")
+    }
+
+    /// Downloads a build and leaves it in the install menu instead of running
+    /// it: the marketplace hands off here so an app can be configured — name,
+    /// capabilities, tweaks — before it's signed.
+    func prepareLinkedIPA(_ url: URL) {
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
+        lastError = nil
+        Task { @MainActor in
+            _ = await self.importCustomIPA(fromLink: url.absoluteString)
+        }
+    }
+
+    /// Queue completion means the pipeline finished, not merely that a task was scheduled.
+    @MainActor
+    func installQueuedIPA(_ url: URL) async throws {
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else {
+            throw EngineError.message(L("An installation is already running."))
+        }
+        queuedInstallActive = true
+        defer { queuedInstallActive = false }
+        try Task.checkCancellation()
+        lastError = nil
+        installSource = .custom
+        if url.isFileURL {
+            await importCustomIPA(from: url)
+        } else if !(await importCustomIPA(fromLink: url.absoluteString)) {
+            throw EngineError.message(lastError ?? L("Couldn't import the IPA."))
+        }
+        try Task.checkCancellation()
+        if let error = lastError { throw EngineError.message(error) }
+        if let report = await Self.inspectCustomImport(),
+           let blocker = report.issues.first(where: { $0.severity == .blocker }) {
+            throw EngineError.message(L("%@: %@", blocker.title, blocker.detail))
+        }
+        await settleNetworkStatus()
+        try Task.checkCancellation()
+        guard let task = runOneClick(afterProbe: true, fromQueue: true) else {
+            throw EngineError.message(lastError ?? guide?.title ?? L("Installation could not start."))
+        }
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+            Task { @MainActor in self.cancelOneClick() }
+        }
+        try Task.checkCancellation()
+        if let error = lastError { throw EngineError.message(error) }
+        guard lastInstallSucceeded else { throw CancellationError() }
+    }
+
+    func installLocalIPA(at url: URL, then run: Bool = true) {
+        guard !queuedInstallActive, !isRunning, !isImportingIPA else { return }
+        lastError = nil
+        installSource = .custom
+        Task { @MainActor in
+            await self.importCustomIPA(from: url)
+            // A failed import leaves its reason up instead of installing the
+            // build that was already there.
+            guard self.lastError == nil, self.customIPAName != nil else { return }
+            if run { self.runOneClick() }
         }
     }
 
@@ -3589,10 +3979,75 @@ final class Engine {
     // app and installs it over itself, reusing the pipeline's sign and install
     // steps without touching the one-click checklist.
 
+    /// The `.ipa` the Install screen is pointed at, which is the build App
+    /// configuration should describe: whatever this session already downloaded,
+    /// else the custom import, else the copy of the selected build on disk.
+    ///
+    /// Deliberately never the running app's own bundle — the configuration is
+    /// for the build being installed, not for SideInstaller.
+    var installTargetIPA: URL? {
+        if let path = downloadedIPAPath, FileManager.default.fileExists(atPath: path) {
+            let url = URL(fileURLWithPath: path)
+            if IPALibrary.looksLikeIPA(url) { return url }
+        }
+        if installSource == .custom {
+            return IPALibrary.customImport()?.url
+        }
+        return IPALibrary.entry(source: installSource, channel: selectedChannel)?.url
+    }
+
+    /// An installed app's icon, from the device itself.
+    @MainActor
+    func appIcon(bundleID: String, side: CGFloat = 60) async throws -> Data? {
+        try await ensurePairingConnection()
+        return try await onDeviceQueue { try self.connection.appIcon(bundleID: bundleID, side: side) }
+    }
+
+    /// Icons for several apps over one device round trip.
+    @MainActor
+    func appIcons(bundleIDs: [String], side: CGFloat = 60) async throws -> [String: Data] {
+        try await ensurePairingConnection()
+        return try await onDeviceQueue {
+            try self.connection.appIcons(bundleIDs: bundleIDs, side: side)
+        }
+    }
+
+    /// Launches an installed app the way the Home Screen does.
+    @MainActor
+    func launchApp(bundleID: String, name: String) async throws {
+        try await ensurePairingConnection()
+        log("Launching \(name)…")
+        let pid = try await onDeviceQueue { try self.connection.launchApp(bundleID: bundleID) }
+        log(pid > 0 ? "Launched \(name) (pid \(pid))." : "Launched \(name).")
+    }
+
+    /// Removes an app from the device, data and all, over the same link the
+    /// install uses.
+    @MainActor
+    func uninstallApp(bundleID: String, name: String) async throws {
+        guard !isRunning else {
+            throw EngineError.message(L("An install is already running. Wait for it to finish, then uninstall."))
+        }
+        try await ensurePairingConnection()
+        log("=== Uninstalling \(name) ===")
+        do {
+            try await onDeviceQueue { try self.connection.uninstall(bundleID: bundleID) }
+            log("Uninstalled \(bundleID).")
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            log("⛔️ Uninstall failed: \(message)")
+            throw EngineError.message(L("Couldn't uninstall \(name): \(message)"))
+        }
+    }
+
     /// Prepares for a refresh: checks iOS and credentials, opens the device link
     /// (which provides the UDID for signing), and signs in.
+    ///
+    /// `interactive` is false for a background pass, which can't put a 2FA sheet
+    /// on screen: a session that has to ask for a code is reported as needing the
+    /// app rather than silently attempted.
     @MainActor
-    func prepareRefresh() async throws {
+    func prepareRefresh(interactive: Bool = true) async throws {
         guard osSupported else {
             throw EngineError.message(L("iOS %@ isn't supported — SideInstaller needs iOS %@ or later.",
                                         osVersionText, Engine.minimumTunnelOSText))
@@ -3601,7 +4056,16 @@ final class Engine {
             throw EngineError.message(L("No Apple ID saved. Add one in Settings › Account."))
         }
         try await ensurePairingConnection()
-        try await signIn(updatingChecklist: false, purpose: .refresh)
+        if !interactive, appleSessionNeedsAttention {
+            throw EngineError.message(L("Signing in needs your attention (a verification code). Open SideInstaller to finish it."))
+        }
+        try await signIn(updatingChecklist: false)
+    }
+
+    /// True when a sign-in is waiting on a code the user has to type.
+    var appleSessionNeedsAttention: Bool {
+        if case .asking = twoFactor { return true }
+        return false
     }
 
     /// Re-signs `ipaPath` (issuing a new provisioning profile) and installs it
@@ -3613,13 +4077,20 @@ final class Engine {
         let udid = deviceUDID ?? ""
         let device = deviceName ?? ""
         log("=== Refreshing \(name) from \((ipaPath as NSString).lastPathComponent) ===")
+        // A refresh's source is the best copy there is; keep it.
+        if let info = IPALibrary.appInfo(at: URL(fileURLWithPath: ipaPath)) {
+            IPACache.store(URL(fileURLWithPath: ipaPath), bundleID: info.bundleID,
+                           displayName: name)
+        }
         let path = pairingFilePath ?? PairingController.pairingFilePath()
         let signed: String
+        let requestExtraMemory = extraMemory
         do {
             signed = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipaPath, udid: udid, deviceName: device,
                                      pairingFilePath: path,
-                                     forMadeira: Self.isMadeira(ipaPath: ipaPath))
+                                     forMadeira: Self.isMadeira(ipaPath: ipaPath),
+                                     extraMemory: requestExtraMemory)
             }
         } catch EngineError.certExists {
             // Don't set `certConflict`: its retry button starts a full install
@@ -4102,8 +4573,16 @@ final class Engine {
         (error as? LocalizedError)?.errorDescription ?? String(describing: error)
     }
 
-    /// Bridge a blocking deviceQueue body to async.
-    private func onDeviceQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+    /// Opens the device link if it isn't open, for the JIT session, which runs
+    /// outside the install pipeline.
+    @MainActor
+    func prepareDeviceLink() async throws {
+        try await ensurePairingConnection()
+    }
+
+    /// Bridge a blocking deviceQueue body to async, for a caller outside this
+    /// class (the JIT session) that has to share the one device link.
+    func onDeviceQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
             deviceQueue.async {
                 do { cont.resume(returning: try work()) }
@@ -4111,6 +4590,7 @@ final class Engine {
             }
         }
     }
+
 
     /// Bridge a blocking signQueue body to async.
     private func onSignQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
@@ -4680,3 +5160,4 @@ struct TwoFactorPhase: Equatable {
 
     var isAsking: Bool { answer == nil }
 }
+

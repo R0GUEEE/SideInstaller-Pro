@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "sourceName": "GBox Sample",
+  "sourceAuthor": "Sample",
+  "sourceImage": "https://example.com/gbox.png",
+  "sourceDescription": "A GBox repository.",
+  "apps": [
+    {
+      "name": "GBox App",
+      "version": "3.1",
+      "downloadURL": "https://example.com/gbox.ipa",
+      "iconURL": "https://example.com/g.png",
+      "size": "12.4 MB",
+      "localizedDescription": "An app from a GBox repository.",
+      "versionDate": "2026-09-01"
+    }
+  ]
+}

@@ -103,6 +103,12 @@ struct OfficialSourceWarning: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            VStack(spacing: 14) {
+                Button(L("Yes, from sideinstaller.net"), action: onConfirm)
+                    .buttonStyle(PrimaryButtonStyle())
+                Button(L("No, or I'm not sure")) { unofficial = true }
+                    .buttonStyle(SecondaryButtonStyle())
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)

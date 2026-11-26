@@ -44,8 +44,15 @@ struct SettingsView: View {
     @State private var confirmEnableDeveloperMode = false
     /// Set while the Report a problem sheet is up.
     @State private var showReport = false
-    /// Buttons, switches and messages make sounds; see `SoundEffects`.
-    @AppStorage(SoundEffects.enabledKey) private var soundEffects = true
+    /// A one-line note from an action in the extensions (reset, clear).
+    @State private var settingsNote: String?
+
+    /// Called by the settings extensions to report what an action did.
+    func showNote(_ text: String) {
+        settingsNote = text
+    }
+    /// Set while the app-configuration toolkit is up.
+    @State private var showAppConfig = false
 
     private struct DeveloperModeNote {
         let text: String
@@ -62,10 +69,29 @@ struct SettingsView: View {
                 developerModeSection
                 downloadsSection
                 anisetteSection
+                appConfigSection
+                sourcesSection
                 advancedSection
                 logSection
+                diagnosticsSection
+                aboutSection
             }
             .sheet(item: $editorTarget) { AccountEditor(target: $0) }
+            .overlay(alignment: .bottom) {
+                if let settingsNote {
+                    Text(settingsNote)
+                        .font(.caption)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(.ultraThinMaterial))
+                        .padding(.bottom, 12)
+                        .transition(.opacity)
+                        .task(id: settingsNote) {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            withAnimation { self.settingsNote = nil }
+                        }
+                }
+            }
             .sheet(isPresented: $showReport) { ReportProblemView() }
             // Attached to the Form, apart from the download alert below, so the
             // two alerts don't conflict.
@@ -469,6 +495,44 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+
+    /// The app-configuration toolkit, one tap from Settings as well as from the
+    /// Install screen: identity, Info.plist keys, entitlements, extensions,
+    /// tweaks and injectors, all applied when a custom .ipa is signed.
+    private var appConfigSection: some View {
+        Section {
+            Button {
+                showAppConfig = true
+            } label: {
+                HStack {
+                    Label(L("App configuration"), systemImage: "slider.horizontal.3")
+                    Spacer()
+                    let count = AppConfigStore.shared.config.summary.count
+                    Text(count == 0 ? L("Nothing changed") : L("%d changes", count))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+        } footer: {
+            Text(L("Applies to the .ipa on the Install tab: rename it, edit its plists and entitlements, drop extensions, and inject tweaks before signing."))
+                .font(.caption2)
+        }
+        .sheet(isPresented: $showAppConfig) { AppConfigView() }
+    }
+
+    /// The About page, which used to be its own tab: version, credits, the
+    /// licence and the source links.
+    private var aboutSection: some View {
+        Section {
+            NavigationLink {
+                AboutView()
+                    .navigationTitle(L("About"))
+            } label: {
+                Label(L("About SideInstaller"), systemImage: "info.circle")
+            }
+        }
     }
 
     // MARK: Advanced

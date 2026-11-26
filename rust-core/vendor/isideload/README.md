@@ -19,7 +19,7 @@ it only to the main `.app`. App extensions got nothing, even though
 `register_app_ids` registered an App ID for each of them (it no longer does,
 change 12) and `sign::sign` signs every nested bundle with the *main* app's entitlements
 (`SettingsScope::Main`) — AltStore's "use main profile" arrangement. So the
-signature was fine and only the file was missing.
+signature could be produced, but the main profile may not authorize an extension’s ID or capabilities; compatibility is not guaranteed.
 
 That is enough to brick SideStore. `DatabaseManager.prepareDatabase()` walks
 `appExtensions` on every launch and `InstalledExtension.init` throws when a
@@ -376,92 +376,6 @@ took it and `init` answered -20970, and ani.sidestore.io was skipped with
 as SideStore's Mac (which second factor Apple picks, the token), and the 2FA
 fallbacks.
 
-iLoader 2.4.1 (`d319ce7`, isideload 0.5.2, 2026-10-28) does the same "while
-waiting for the anisette servers to update", to fix SMS 2FA's 403, with one
-fixed client for every server through isideload 0.5.1's
-`set_client_info_override` (`20b06c7`):
-`<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>`,
-user agent `akd/1.0 CFNetwork/811.5.4`. isideload 0.5.2 (`326e562`) then asks
-for the URL bag as that client instead of as a Mac; this crate already asks as
-the client and falls back to the Mac only for an incomplete bag. Not ported:
-`client_info_to_use` replaces only a Mac older than macOS 10.13, so a server
-that starts naming a current one is taken as it is. All six macOS servers
-still named the Sierra Mac on 2026-10-28.
-
-From 2026-11-20 (about 02:20 UTC) Apple's edge answers GsService2 with HTTP
-503 for every client that names its OS `macOS`, and lets `Mac OS X` through:
-SideInstaller 2.1.0 and siboot 0.20.0 failed every sign-in through every
-macOS server (SideInstaller #146–#161, siboot's #153), and anisette.lillq.me's
-hourly probes list all its `macOS;…` clients as "edge-blocked 503" and the
-Sierra Mac as passing. Measured 2026-11-21 with made-up accounts, through
-anisette.lillq.me, new.ani.sidestore.io and mac-ani.jkcoxson.com alike:
-`<MacBookPro18,3> <macOS;26.6;25F84>` gets 503 at `init`; the Sierra Mac,
-`<MacBookPro15,1> <Mac OS X;10.15.7;19H2>` and `… <Mac OS X;10.13.6;17G14042>`
-get -20970 (or -1 for an example.com address), also on an identity provisioned
-while reporting macOS 26.6. iLoader's fixed `<Mac15,7> <macOS;27.0;26A5378j>`
-is a `macOS` client too.
-
-- `CURRENT_MAC_CLIENT_INFO` is now
-  `<MacBookPro16,1> <Mac OS X;10.15.7;19H2> <com.apple.AuthKit/1 (com.apple.akd/1.0)>`
-  with Catalina akd's user agent, `akd/1.0 CFNetwork/1128.0.1 Darwin/19.6.0`:
-  Catalina is the newest macOS that still sends `Mac OS X` (Big Sur renamed
-  it), and over the 10.13 floor. It still counts as a current Mac for
-  `Slots::fits`, so the identities provisioned as macOS 26.6 are kept.
-- `grandslam.rs`'s `MAC_CLIENT_INFO` (the bare-403 and incomplete-bag
-  fallback) is the same Mac, where it was `<Mac15,7> <macOS;27.0;26A5378j>`.
-- anisette.lillq.me is a pool that switches between Apple's macOS and Android
-  libraries by what passes its probes (mac → android on 2026-11-20 02:21,
-  pinned back to mac at 23:11), and its identities fit no other server: its
-  `adi_pb` is 10,240 bytes where the macOS servers' is 671, they answer it
-  `{"result":"GetHeadersError","message":"adi_pb too large"}` (HTTP 200), and
-  it answers theirs -45061. `fetch_headers_for` now takes "adi_pb too large"
-  as not provisioned too, so `provision` passes over the identity instead of
-  failing the attempt with "Failed to check a stored anisette identity", which
-  would have failed every other server after one sign-in through lillq.
-
-Tests: `cargo test -p isideload --lib anisette` (17, one new: a stored lillq
-identity offered first is passed over). A throwaway test ran the app's
-`apple_session::open` with a made-up account through anisette.lillq.me, then
-new.ani.sidestore.io, then lillq again on one storage directory: each `init`
-answered -20970, new.ani.sidestore.io provisioned an identity of its own after
-lillq's, and lillq took its own back. **Not verified:** a real account (the
-second factor, `/auth` as this Mac, the token).
-
-Catalina was the wrong pick, from the iLoader 2.4.2 follow-ups (compared
-2026-11-24). iLoader 2.4.2 (`7364ae6`, 2026-11-20, isideload still 0.5.2) only
-moved its override back to the servers' Sierra Mac with
-`akd/1.0 CFNetwork/811.5.4 Darwin/16.7.0`. Its users then reported what this
-crate saw through the macOS servers on 2026-10-16: `secondaryAuth`, then 403s
-from the trusted-number and text-message pages, or -22410 and -23782 before
-the password proof (iLoader #1203, #1205; SideStore #1745). Apple's own
-frameworks send `Mac OS X` on every macOS version; AltServer on macOS 15.8.1
-signed in once its `macOS` became `Mac OS X` (AltStore #1875). A current Mac
-spelled that way (`<Mac OS X;27.3;26C5035r>`, `<Mac OS X;27.2.1;26B131>`,
-`<Mac OS X;26.6;25F84>`) got the code on the trusted devices and signed in,
-for accounts with a free team and with Advanced Data Protection. In #1304 one
-change of client info, with the anisette state kept from 10.12.6, gave -22410;
-after "Reset Anisette State" the same account signed in.
-None of them tried Catalina with a real account, and neither did this crate.
-
-- `CURRENT_MAC_CLIENT_INFO` is
-  `<MacBookPro18,3> <Mac OS X;26.6;25F84> <com.apple.AuthKit/1 (com.apple.akd/1.0)>`
-  with `AuthKit/1 (Macintosh; OS X 26.6) (com.apple.akd/1.0)`: 1.6.1's Mac
-  (SideStore's default) and user agent, with the `Mac OS X` spelling.
-- `Slots::fits`: a full sign-in reporting a current Mac takes only an identity
-  `provisioned_as` that exact client, no longer any current Mac, so identities
-  made as macOS 26.6 spelled `macOS` (1.6.1 to 2.1.0) or as Catalina (2.1.1)
-  stay assigned for their saved tokens, and the next password sign-in
-  provisions a new one, which may cost one more second factor.
-
-Tests: `cargo test -p isideload --lib remote_v3` (16; `fits` and the mock
-server cover a Catalina identity being passed over). A throwaway test ran the
-app's `apple_session::open` with a made-up account, twice through each of
-anisette.lillq.me, new.ani.sidestore.io, mac-ani.jkcoxson.com, ani.iloader.app
-and ani3.stikstore.app on a fresh storage directory: no 503, every `init`
-answered -20970 until the tenth (-20209, the made-up address locked), lillq
-and the macOS servers each provisioned an identity as this Mac. **Not
-verified:** a real account.
-
 **3. `src/auth/apple_account.rs`, `builder.rs`, `grandslam.rs` — let the user
 choose how the 2FA code arrives.**
 
@@ -698,125 +612,50 @@ else to choose here. `si_appid_quota` (`rust-core/src/account.rs`) counts the
 main App ID alone to match. App IDs registered for extensions before stay on the
 team until they expire.
 
-**13. `src/sideload/sideloader.rs` — Increased Memory Limit for every app but
-the app stores that refresh themselves (iLoader 2.4.1).**
+**13. `src/sideload/sign.rs`, `application.rs`, `sideloader.rs`,
+`src/dev/app_ids.rs` — check a signature before making it, and register nothing
+on a wildcard team.**
 
-iLoader 2.4.1 (`d319ce7`, 2026-10-28) passes `true` for `install_app`'s
-`increased_memory_limit`, so every App ID it signs for gets that capability
-("no need for GetMoreRam"). Here the bool is a `MemoryLimit`: `Off`,
-`Required` (signing fails if Apple refuses; Madeira) and `Preferred`, which the
-Install tab and the Apps tab's refresh use (`si_sign_ipa`'s 2). `Preferred`
-leaves out SideStore, LiveContainer+SideStore, AltStore and StikStore, and when
-Apple refuses, it logs that and signs without the capability. Since `sign` uses
-the profile's entitlements, the capability puts
-`com.apple.developer.kernel.increased-memory-limit` into the signature.
+What the signer produced was never read back. Five things could go wrong
+quietly, each ending in a signature that installs and then misbehaves:
 
-Why the app stores are left out: they refresh themselves. Once Apple expires a
-free team's App ID (7 days after it was registered), SideStore registers a new
-one and refreshes by installing that App ID's profiles, without signing itself
-again (`RefreshAppOperation`). On a free team that new App ID never gets the
-capability: SideSign's `Feature.freeFeatures` is App Groups and Inter-App Audio
-only, and SideSign sends no `bundleIdCapabilities` request (SideStore issue
-#1616, open; the fix, SideSign PR #4, unmerged on 2026-10-28, and SideStore's
-`develop` pins SideSign `752d1ef`). A SideStore signed with the entitlement, or
-a LiveContainer it lives in, would then only get profiles that grant less than
-its signature claims, which is what change 10 avoids for Madeira's app group.
-How iOS treats that wasn't tried here. AltStore enables the capability again
-for an app whose entitlements have it (AltSign `b2c8861`, 2025-03), and
-StikStore wasn't checked; none of the four needs the memory.
+- **An extension nested in another bundle kept its old identifier.**
+  `update_bundle_id` renamed only top-level `PlugIns` entries, so a `.appex`
+  under one of those was signed for an App ID nobody registered (change 12).
+  It now walks the whole tree, taking each suffix from the original identifier
+  and leaving an already-re-prefixed build alone (idempotent).
+- **An `.appex` outside `PlugIns`** (an SDK's helper inside `Frameworks/`) got
+  the empty entitlement set and no profile, and nothing said so. `sign` refuses
+  such a build now, naming the bundle; the app checks for one before it signs.
+- **Two bundles with one `CFBundleIdentifier`** would both be looked up by
+  apple-codesign-quick, and the second would be handed the first one's profile.
+  That is an error now.
+- **A profile that has expired** (`ExpirationDate` within a minute, or past)
+  is refused rather than signed with. SideStore's 7-day profiles make this
+  reachable with a device clock that is ahead.
+- **A profile that does not grant the identifier** it is used for — a wildcard
+  profile signed for an app on an ordinary team, or the reverse — is refused.
+  `application-identifier` is read from the profile and checked: exact for an
+  explicit App ID, prefix (`TEAM.*`, `com.example.*`) for a wildcard, and
+  children of an App ID allowed, as Apple allows them.
 
-Apps SideInstaller refreshes are signed again every time, so a new App ID gets
-the capability again then. The cost is one more request per App ID per sign:
-upstream's `add_increased_memory_limit`, the request GetMoreRam and AltSign
-send, which Madeira's signing already used. A free Apple ID's run reported in
-SideInstaller PR #79 (iOS 27.0.1, 2026-10-15) got both the app group and the
-capability on one App ID, so the request doesn't drop the group. Tests:
-`cargo test -p isideload --lib sideloader`. Not tested: a sign with an Apple
-ID.
+Capability changes are read back. `ensure_group_feature` and
+`add_increased_memory_limit` return "accepted", but the profile is built from
+what Apple stored, so `require_app_group_feature` and `require_capability`
+(`AppIdVerification`) list the App ID again and fail when the feature is not
+set. Without that, a PATCH Apple answered but did not apply produced a profile
+without `application-groups` and a signature that followed it: an app installed
+with a shared container it cannot open.
 
-**14. `src/sideload/bundle.rs`, `sign.rs` — app extensions in `Extensions/`
-too (SideInstaller issue #110).**
-
-`Bundle::new` looked for app extensions in `PlugIns/` only. Apps keep their
-ExtensionKit extensions (`EXAppExtensionAttributes` in the Info.plist) in
-`Extensions/`, and an extension there was left out of everything that works
-from that list: `update_bundle_id` kept its bundle ID, `sign` gave it neither
-the main profile nor the entitlements, and `clear_old_signatures` skipped its
-old signature. iOS refuses such an app before it looks at any signature:
-
-```
-Failed to set app extension placeholders for com.zarz.mornye.TEAMID1234
-Attempted to set app extension placeholder promise with bundle ID
-com.zarz.mornye.LinkNowPlaying that does not match required prefix of
-com.zarz.mornye.TEAMID1234. for parent
-```
-
-That was Mornye's Now Playing remote-media extension (iOS 27). iLoader issue
-#394 has the same error for Instagram's `lockscreencamera` extension, where
-nab138 named this cause on 2026-08-01; upstream still looks in `PlugIns/` only
-(`326e562`, 2026-10-28). `Bundle::new` now also takes the `.appex` folders in
-`Extensions/`, after those in `PlugIns/`, so they are rebased
-(`com.zarz.mornye.TEAMID1234.LinkNowPlaying`), get the main profile and
-entitlements, and get `ALTAppGroups` for the AltStore family, as `PlugIns/`
-ones do. Only `.appex` folders count there, so a resource bundle in
-`Extensions/` can't make `update_bundle_id` refuse the app for a bundle ID
-outside the app's. apple-codesign-quick 0.1.0 had the same blind spot, signing
-nested bundles in `Frameworks/` and `PlugIns/` only, so it is vendored with the
-same rule (`vendor/apple-codesign-quick/README.md`); with the fix here alone,
-the extension would have been rebased but its executable left unsigned.
-
-Tests: `cargo test -p isideload --lib sideload::`
-(`finds_app_extensions_in_plugins_and_extensions`,
-`rebases_extensions_in_plugins_and_extensions` and
-`every_app_extension_is_provisioned`, on that app's layout) and
-`cargo test -p apple-codesign-quick --lib`
-(`signs_app_extensions_in_extensions`, which fails against 0.1.0).
-
-**15. `Cargo.toml`, `src/lib.rs`, `src/util/mod.rs`, `src/sideload/sideloader.rs`
-— build without idevice when `install` is off.**
-
-The `install` feature is meant to be what pulls in `idevice`
-(`install = ["dep:idevice"]`), but three uses sat outside it:
-`use idevice::IdeviceError` and the `SideloadError::IdeviceError` variant in
-`lib.rs`, the `util::device` module (lockdown-based `IdeviceInfo`), and the
-`IdeviceInfo` / `IdeviceProvider` imports in `sideloader.rs`. All of them only
-serve `install_app`, so they are now behind `#[cfg(feature = "install")]`, as
-`sideload::install` already was. `delete_app_after_install` is only read by
-`install_app` and gets an `allow(dead_code)` when it is off.
-
-Turning `install` off also showed that `serde`'s `derive` feature had only been
-reaching isideload through idevice, so `Cargo.toml` now asks for it.
-
-SideInstaller only calls `sign_app` and installs through idevice-ffi, so
-`rust-core/Cargo.toml` now leaves `install` off. Before, it had to turn it on,
-which compiled a second `idevice` (0.1.65 from crates.io) next to the patched
-git one for code that was never called. Checked with
-`cargo check --no-default-features --features fs-storage` and with
-`--features install,fs-storage` on this crate, and with
-`cargo tree -i idevice` on `rust-core` (one copy left). Upstream `main`
-(`326e562`) still has the same three ungated uses.
-
-Checked on the Mac (2026-11-01) with an IPA of that layout (arm64 binaries from
-the iOS 27.2 SDK), a self-signed test certificate and a CMS-signed profile, run
-through `Application::new`, `update_bundle_id` and `sign` as `sign_app` calls
-them. `LinkNowPlaying.appex` came out as
-`com.zarz.mornye.TEAMID1234.LinkNowPlaying`, signed under that identifier with
-the main entitlements and a copy of the profile, the same as the widget in
-`PlugIns/`. `codesign --verify --strict` passes for it, and
-`codesign --verify --deep --strict` for the app, whose `CodeResources` seals
-the extension's signed files. The same IPA through the code before this change
-kept `com.zarz.mornye.LinkNowPlaying`, got no profile and gave "code object is
-not signed at all", while `codesign --verify --deep --strict` still passed for
-the app, which had sealed the extension's files as its own. **Not verified:**
-an install on an iPhone, and whether iOS runs an ExtensionKit extension signed
-with the main app's profile and entitlements, the arrangement `PlugIns/`
-extensions get (changes 1 and 12).
+**Wildcard teams.** When every profile the team holds is a wildcard one
+(`TEAM.*`), no App ID is registered for the app or its extensions and no app
+group is asked for: the profile already covers every identifier, and on a free
+account the ten App IDs are worth keeping. `si_appid_quota` makes the same
+check, so the install menu does not ask for an approval that costs nothing.
+`keychain-access-groups` for LiveContainer is merged with what the profile has
+rather than replacing it.
 
 ## Re-vendoring
-
-Upstream's `sign_app` and `install_app` take `increased_memory_limit: bool`, and
-iLoader 2.4.1 passes `true` for every app. A re-vendor has to keep change 13's
-`MemoryLimit`, or SideStore gets the capability too.
 
 Upstream fixed change 1 its own way in `baca89d` (per-extension profiles). Since
 isideload 0.5.0 (`fc7a81a`) it can also do what change 1 and change 12 do:
@@ -828,18 +667,6 @@ has to set `ReuseMain`, as iLoader 2.4.0 does, or SideStore goes back to costing
 
 Change 7 is upstream on `main` from `5992f00` (isideload 0.4.0), without the
 `_CodeSignature` cleanup.
-
-Upstream still looks for app extensions in `PlugIns/` only (`326e562`), so a
-re-vendor has to keep change 14, and the vendored apple-codesign-quick with it,
-or apps with an extension in `Extensions/` fail to install again. An upstream
-pull request does the `bundle.rs` half of it: nab138/isideload#28 by
-LosFarmosCTL ("Load app extensions from both supported directories", open since
-2026-10-20). Its apple-codesign-quick counterpart, Dadoum/apple-crates#6, was
-closed because Dadoum fixed it in the Tangled repository instead; crates.io
-still has only 0.1.0 (checked 2026-11-09).
-
-A re-vendor has to keep change 15 too, unless upstream gates those uses itself,
-or `rust-core/Cargo.toml` has to turn `install` back on.
 
 Change 2 is upstream on the `apple-codesign-quick` branch at `f6a4d5d` (what
 iLoader 2.3.3 pins) but was not on `main` (`b6d1113`) as of 2026-09-13. A

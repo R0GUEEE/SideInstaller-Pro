@@ -1042,7 +1042,6 @@ struct LocationView: View {
     @EnvironmentObject private var loc: Localizer
     @ObservedObject var manager: LocationManager
 
-    @State private var showSettings = false
     /// Where the map is looking, and the point under the crosshair.
     @State private var camera: MapCameraPosition = .region(
         MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: 37.3349, longitude: -122.0090),
@@ -1108,8 +1107,6 @@ struct LocationView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(AppBackground())
-        .toolbar { settingsToolbarItem(isPresented: $showSettings) }
-        .sheet(isPresented: $showSettings) { SettingsView() }
         .sheet(isPresented: $showRouteImporter) {
             FileImporterRepresentableView(allowedContentTypes: [.gpx, .xml]) { urls in
                 guard let url = urls.first else { return }   // empty means cancelled

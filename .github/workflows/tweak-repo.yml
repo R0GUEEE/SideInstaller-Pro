@@ -1,0 +1,74 @@
+name: tweak-repo
+
+# Reads real repository indexes through the app's own parser and fails if any
+# package is dropped, duplicated, or left without a version or download.
+#
+# "Reads one package and calls it a repository" is the bug this exists to catch:
+# a `Packages` index is Debian control stanzas, and a parser that doesn't fold
+# continuation lines loses every package with a multi-line description.
+#
+# Runs the Swift toolchain on Ubuntu: the model and parser are plain Foundation,
+# so they need no Xcode and no macOS queue.
+
+on:
+  push:
+    paths:
+      - "ios-app/TweakRepos.swift"
+      - "tools/tweak-repo-check/**"
+      - ".github/workflows/tweak-repo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    name: Parse live indexes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:6.0-jammy
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the checker
+        run: |
+          swiftc -O ios-app/TweakRepos.swift tools/tweak-repo-check/main.swift \
+            -o /tmp/tweak-repo-check
+
+      - name: Read real repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v curl >/dev/null || (apt-get update -qq && apt-get install -y -qq curl)
+          install -d "$RUNNER_TEMP/repo"
+          # A truncated index would look like a repository with fewer packages,
+          # which is the failure mode this check is for, so the size and the
+          # shape are validated before the parser sees the file.
+          fetch() {
+            name="$1"; url="$2"
+            for attempt in 1 2 3; do
+              curl -sL -m 90 --retry 2 -A "SideInstaller/tweak-repo" "$url" \
+                -o "$RUNNER_TEMP/repo/$name.Packages" 2>/dev/null || true
+              if python3 -c "
+          import os, sys
+          path = sys.argv[1]
+          if os.path.getsize(path) < 20000: sys.exit(1)
+          text = open(path, encoding='utf-8', errors='replace').read()
+          if text.count('Package: ') < 20: sys.exit(1)
+          print('%-10s %8d bytes, %d stanzas' % (sys.argv[2], os.path.getsize(path), text.count('Package: ')))
+          " "$RUNNER_TEMP/repo/$name.Packages" "$name"; then
+                return 0
+              fi
+              sleep 5
+            done
+            rm -f "$RUNNER_TEMP/repo/$name.Packages"
+            echo "SKIPPED: $url (unreachable from this runner)"
+            return 1
+          }
+          ok=0
+          fetch havoc   https://havoc.app/Packages                    && ok=$((ok + 1))
+          fetch chariz  https://repo.chariz.com/Packages              && ok=$((ok + 1))
+          fetch ellekit https://dhinakg.github.io/ellekit-repo/Packages && ok=$((ok + 1))
+          echo "indexes fetched: $ok"
+          test "$ok" -ge 2 || { echo "::error::fewer than two repositories could be fetched"; exit 1; }
+          /tmp/tweak-repo-check "$RUNNER_TEMP"/repo/*.Packages

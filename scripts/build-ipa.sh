@@ -137,7 +137,7 @@ for ext in "$app"/PlugIns/*.appex "$app"/Extensions/*.appex; do
   ever="$(plist CFBundleShortVersionString "$ext/Info.plist")"
   [ "$ever" = "$version" ] || die "$(basename "$ext") has version $ever, the app $version"
 done
-[ "$exts" -gt 0 ] || die "no app extension in the built app (the Live Activity is missing)"
+[ "$exts" -eq 0 ] || die "unexpected app extension in the extension-free build"
 
 # --- IPA ----------------------------------------------------------------------
 stage="$(mktemp -d)"

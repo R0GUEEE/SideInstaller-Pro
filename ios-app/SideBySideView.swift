@@ -1465,9 +1465,11 @@ final class SideBySideManager: ObservableObject {
             engine.log("Signed bundle at \(path)")
             return path
         } else {
-            let message = error.map { String(cString: $0) } ?? "rc=\(rc)"
+            let raw = error.map { String(cString: $0) } ?? ""
             error.map { si_string_free($0) }
-            engine.log("Sign FAILED: \(message)")
+            let message = raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "No diagnostic returned by the signer (rc=\(rc))." : raw
+            engine.log("Sign FAILED (rc=\(rc)): \(message)")
             // Same errors as the Install tab, worded for another person's
             // account and iPhone.
             if Engine.isCertExistsError(message) {
@@ -1903,12 +1905,6 @@ struct SideBySideView: View {
     @EnvironmentObject private var accounts: AccountStore
     @ObservedObject var manager: SideBySideManager
 
-    @State private var showSettings = false
-    @State private var showReport = false
-    @State private var showImporter = false
-    @State private var confirmingCancel = false
-    /// Set by Continue on the address page while what's typed isn't usable.
-    @State private var showsAddressProblem = false
     @FocusState private var focus: Field?
 
     private enum Field: Hashable { case address, email, password }
@@ -1940,34 +1936,6 @@ struct SideBySideView: View {
         }
         .animation(.smooth(duration: 0.4), value: manager.stage)
         .background(AppBackground())
-        .navigationBarBackButtonHidden(hidesSystemBack)
-        .toolbar {
-            if showsPageBack {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        SoundEffects.play(.tick)
-                        manager.goBack()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                                .font(.body.weight(.medium))
-                            Text(L("Back"))
-                        }
-                    }
-                    .tint(.primary)
-                }
-            }
-            settingsToolbarItem(isPresented: $showSettings)
-        }
-        .sheet(isPresented: $showSettings) { SettingsView() }
-        .sheet(isPresented: $showReport) { ReportProblemView() }
-        .sheet(isPresented: $showImporter) {
-            FileImporterRepresentableView(allowedContentTypes: [.ipa]) { urls in
-                guard let url = urls.first else { return }   // empty means cancelled
-                Task { await manager.importCustomIPA(from: url) }
-            }
-            .ignoresSafeArea()
-        }
         .scrollDismissesKeyboard(.interactively)
         .alert(L("Cancel the install?"), isPresented: $confirmingCancel) {
             Button(L("Yes"), role: .destructive) { manager.cancel() }

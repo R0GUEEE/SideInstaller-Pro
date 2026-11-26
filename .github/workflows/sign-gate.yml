@@ -1,0 +1,67 @@
+name: sign-gate
+
+# Signs a fixture app through the vendored signer and checks the result with
+# Apple's own codesign. The app's build only proves the signer compiles; this
+# proves what it produces: the app and each extension carry the profile issued
+# for their own identifier, that profile grants the identifier, its
+# entitlements are the signature's entitlements, libraries carry none, and
+# `codesign --verify --deep --strict` passes. No Apple account is involved:
+# scripts/sign-gate.sh makes the certificate and the profiles.
+#
+# What it catches: a signer that drops an extension's profile (SideStore's
+# "missing a valid provisioning profile" crash), signs an extension with the
+# main app's entitlements, hands a framework the app's entitlements, or seals
+# the profiles where iOS doesn't look for them.
+
+on:
+  push:
+    paths:
+      - "rust-core/vendor/isideload/**"
+      - "rust-core/examples/sign_gate.rs"
+      - "rust-core/Cargo.toml"
+      - "rust-core/Cargo.lock"
+      - "scripts/sign-gate.sh"
+      - ".github/workflows/sign-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sign-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Sign a fixture app
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d /Applications/Xcode_27.1.app ]]; then
+            echo "DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer" >> "$GITHUB_ENV"
+          fi
+          xcodebuild -version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust-core/target
+          key: sign-gate-${{ hashFiles('rust-core/Cargo.lock') }}
+          restore-keys: |
+            sign-gate-
+            cargo-ios-
+
+      # The gate runs the example on the host: no iOS cross-compile, no
+      # iphoneos target, and the signer is the same code the app links.
+      - name: Run the gate
+        shell: bash
+        run: bash scripts/sign-gate.sh

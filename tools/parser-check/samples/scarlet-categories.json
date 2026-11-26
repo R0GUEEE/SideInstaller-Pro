@@ -1,0 +1,29 @@
+{
+  "META": {
+    "repoName": "Scarlet Sample",
+    "icon": "https://example.com/meta.png"
+  },
+  "Tweaked": [
+    {
+      "name": "Tweaked App",
+      "bundleID": "com.example.tweaked",
+      "version": "1.2",
+      "down": "https://example.com/tweaked.ipa",
+      "icon": "https://example.com/t.png",
+      "dev": "Sample Dev",
+      "category": "Tweaked",
+      "description": "A tweaked build."
+    }
+  ],
+  "Macdirtycow": [
+    {
+      "name": "MDC App",
+      "bundleID": "com.example.mdc",
+      "version": "2.0",
+      "down": "https://example.com/mdc.ipa",
+      "icon": "https://example.com/m.png",
+      "dev": "Sample Dev",
+      "category": "Macdirtycow"
+    }
+  ]
+}
